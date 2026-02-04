@@ -54,10 +54,26 @@ ipcMain.handle('select-output-dir', async () => {
 
 ipcMain.on('download:start', async (event, payload) => {
   try {
-    const { url, outputDir, quality } = payload;
+    let { url, outputDir, quality } = payload;
     if (!url || !outputDir) {
       event.sender.send('download:error', 'URL e pasta de destino são obrigatórias.');
       return;
+    }
+
+    if (isRadioLikeUrl(url)) {
+      const normalized = normalizeRadioUrl(url);
+      if (!normalized) {
+        event.sender.send(
+          'download:error',
+          'Não foi possível extrair o vídeo base do Mix/Radio. Use o link do vídeo ou playlist.'
+        );
+        return;
+      }
+      url = normalized;
+      event.sender.send(
+        'download:log',
+        `[AVISO] Link Mix/Radio detectado. Usando o vídeo base: ${normalized}`
+      );
     }
 
     const ytDlpBin = await ensureYtDlpBinary(event);
@@ -323,6 +339,49 @@ function decodeBuffer(buffer) {
   if (!utf8Text.includes('�')) return utf8Text;
   const latin1Text = iconv.decode(buffer, 'latin1');
   return latin1Text || utf8Text;
+}
+
+function isRadioLikeUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  const normalized = url.trim().toLowerCase();
+  if (normalized.includes('/mix/') || normalized.includes('mix?')) return true;
+  if (/[?&]start_radio=1/.test(normalized)) return true;
+  if (/[?&]radio=1/.test(normalized)) return true;
+  if (/[?&]list=rd[a-z0-9_]*/.test(normalized)) return true;
+  return false;
+}
+
+function normalizeRadioUrl(inputUrl) {
+  const videoId = extractVideoId(inputUrl);
+  if (!videoId) return null;
+  return `https://www.youtube.com/watch?v=${videoId}`;
+}
+
+function extractVideoId(inputUrl) {
+  if (!inputUrl || typeof inputUrl !== 'string') return null;
+  try {
+    const parsed = new URL(inputUrl);
+
+    const vParam = parsed.searchParams.get('v');
+    if (vParam) return vParam;
+
+    const path = parsed.pathname || '';
+    const mixIndex = path.toLowerCase().indexOf('/mix/');
+    if (mixIndex !== -1) {
+      const afterMix = path.slice(mixIndex + 5);
+      const candidate = afterMix.split('/')[0];
+      if (candidate) return candidate;
+    }
+
+    if (parsed.hostname === 'youtu.be') {
+      const candidate = path.replace(/^\//, '').split('/')[0];
+      return candidate || null;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
 }
 
 function detectPlaylist(url, ytDlpBin) {

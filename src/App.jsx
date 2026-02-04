@@ -23,6 +23,7 @@ export default function App() {
     itemIndex: null,
     itemCount: null
   });
+  const [isCompact, setIsCompact] = useState(false);
   const logBoxRef = useRef(null);
 
   const isReady = useMemo(() => url.trim().length > 0 && outputDir.trim().length > 0, [url, outputDir]);
@@ -69,6 +70,15 @@ export default function App() {
     logBoxRef.current.scrollTop = logBoxRef.current.scrollHeight;
   }, [logs]);
 
+  useEffect(() => {
+    const updateCompact = () => {
+      setIsCompact(window.innerWidth <= 560);
+    };
+    updateCompact();
+    window.addEventListener('resize', updateCompact);
+    return () => window.removeEventListener('resize', updateCompact);
+  }, []);
+
   const handleSelectFolder = async () => {
     if (!window.soundforge) return;
     const selected = await window.soundforge.selectOutputDir();
@@ -98,7 +108,7 @@ export default function App() {
   };
 
   return (
-    <div className="app">
+    <div className={`app ${isCompact ? 'compact' : ''}`}>
       <header className="hero">
         <div>
           <p className="eyebrow">Forja Sonora</p>
@@ -150,10 +160,16 @@ export default function App() {
 
         <div className="actions">
           <button className="button primary" type="button" onClick={handleDownload} disabled={!isReady || isDownloading}>
-            {isDownloading ? 'Forjando...' : 'Iniciar download'}
+            <span className="button-icon">{isDownloading ? '*' : 'v'}</span>
+            <span className="button-content">
+              <span className="button-title">{isDownloading ? 'Forjando...' : 'Iniciar download'}</span>
+              <span className="button-subtitle">
+                {isDownloading ? 'Mantendo o ritual em execução' : 'MP3 com qualidade escolhida'}
+              </span>
+            </span>
           </button>
           <div className="status">
-            <span className="status-dot"></span>
+            <span className={`status-dot ${isDownloading ? 'busy' : ''}`}></span>
             <span>{status}</span>
           </div>
         </div>
