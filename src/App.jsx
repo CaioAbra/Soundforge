@@ -8,10 +8,21 @@ const QUALITY_OPTIONS = [
   { label: '9 (Menor)', value: '9' }
 ];
 
+const SOURCE_OPTIONS = [
+  { label: 'YouTube', value: 'youtube' },
+  { label: 'Spotify', value: 'spotify' }
+];
+
 export default function App() {
   const [url, setUrl] = useState('');
   const [outputDir, setOutputDir] = useState('');
   const [quality, setQuality] = useState('5');
+  const [source, setSource] = useState('youtube');
+  const [spotifyToken, setSpotifyToken] = useState('');
+  const [spotifyPlaylistUrl, setSpotifyPlaylistUrl] = useState('');
+  const [spotifyPreview, setSpotifyPreview] = useState(null);
+  const [isPreviewing, setIsPreviewing] = useState(false);
+  const [previewError, setPreviewError] = useState('');
   const [isDownloading, setIsDownloading] = useState(false);
   const [logs, setLogs] = useState([]);
   const [status, setStatus] = useState('Aguardando um link.');
@@ -26,7 +37,16 @@ export default function App() {
   const [isCompact, setIsCompact] = useState(false);
   const logBoxRef = useRef(null);
 
-  const isReady = useMemo(() => url.trim().length > 0 && outputDir.trim().length > 0, [url, outputDir]);
+  const isReady = useMemo(() => {
+    if (source === 'spotify') {
+      return (
+        spotifyToken.trim().length > 0 &&
+        spotifyPlaylistUrl.trim().length > 0 &&
+        outputDir.trim().length > 0
+      );
+    }
+    return url.trim().length > 0 && outputDir.trim().length > 0;
+  }, [source, spotifyToken, spotifyPlaylistUrl, url, outputDir]);
   const progressPercent = Number.isFinite(progress.percent) ? Math.min(100, Math.max(0, progress.percent)) : 0;
   const progressLabel = `${progressPercent.toFixed(1)}%`;
   const trackLabel = progress.title || (isDownloading ? 'Invocando faixa...' : 'Nenhuma faixa em execução');
@@ -79,6 +99,11 @@ export default function App() {
     return () => window.removeEventListener('resize', updateCompact);
   }, []);
 
+  useEffect(() => {
+    setSpotifyPreview(null);
+    setPreviewError('');
+  }, [source, spotifyPlaylistUrl, spotifyToken]);
+
   const handleSelectFolder = async () => {
     if (!window.soundforge) return;
     const selected = await window.soundforge.selectOutputDir();
@@ -101,10 +126,32 @@ export default function App() {
     });
 
     window.soundforge.startDownload({
+      source,
       url: url.trim(),
+      spotifyToken: spotifyToken.trim(),
+      spotifyPlaylistUrl: spotifyPlaylistUrl.trim(),
       outputDir: outputDir.trim(),
       quality
     });
+  };
+
+  const handleSpotifyPreview = async () => {
+    if (!window.soundforge || isPreviewing || isDownloading) return;
+    if (!spotifyToken.trim() || !spotifyPlaylistUrl.trim()) return;
+    setPreviewError('');
+    setIsPreviewing(true);
+    try {
+      const data = await window.soundforge.getSpotifyPreview({
+        spotifyToken: spotifyToken.trim(),
+        spotifyPlaylistUrl: spotifyPlaylistUrl.trim()
+      });
+      setSpotifyPreview(data);
+    } catch (err) {
+      setSpotifyPreview(null);
+      setPreviewError(err?.message || 'Falha ao buscar prévia da playlist.');
+    } finally {
+      setIsPreviewing(false);
+    }
   };
 
   return (
@@ -121,13 +168,87 @@ export default function App() {
       </header>
 
       <section className="panel">
+        <label className="label">Fonte</label>
+        <div className="select-row">
+          {SOURCE_OPTIONS.map((option) => (
+            <label key={option.value} className={`radio ${source === option.value ? 'active' : ''}`}>
+              <input
+                type="radio"
+                name="source"
+                value={option.value}
+                checked={source === option.value}
+                onChange={() => setSource(option.value)}
+              />
+              <span>{option.label}</span>
+            </label>
+          ))}
+        </div>
+
+        {source === 'youtube' ? (
         <label className="label">Link do YouTube</label>
+        ) : (
+        <label className="label">Link da playlist do Spotify</label>
+        )}
         <input
           className="input"
-          placeholder="Cole aqui o link da música ou playlist"
-          value={url}
-          onChange={(event) => setUrl(event.target.value)}
+          placeholder={source === 'youtube' ? 'Cole aqui o link da música ou playlist' : 'Cole aqui o link da playlist do Spotify'}
+          value={source === 'youtube' ? url : spotifyPlaylistUrl}
+          onChange={(event) => {
+            if (source === 'youtube') setUrl(event.target.value);
+            else setSpotifyPlaylistUrl(event.target.value);
+          }}
         />
+
+        {source === 'spotify' && (
+          <>
+            <label className="label token-label">Token do Spotify</label>
+            <input
+              className="input"
+              type="password"
+              placeholder="Cole aqui seu token Bearer"
+              value={spotifyToken}
+              onChange={(event) => setSpotifyToken(event.target.value)}
+            />
+            <p className="helper">
+              O token é temporário. Não compartilhe nem versione em repositório.
+            </p>
+            <div className="preview-row">
+              <button
+                className="button ghost"
+                type="button"
+                onClick={handleSpotifyPreview}
+                disabled={!spotifyToken.trim() || !spotifyPlaylistUrl.trim() || isPreviewing || isDownloading}
+              >
+                {isPreviewing ? 'Carregando prévia...' : 'Ver prévia da playlist'}
+              </button>
+              {previewError && <span className="helper error">{previewError}</span>}
+            </div>
+            {spotifyPreview && (
+              <div className="preview-box">
+                <div className="preview-header">
+                  <h3>{spotifyPreview.name || 'Playlist do Spotify'}</h3>
+                  <span>
+                    {spotifyPreview.total ? `${spotifyPreview.total} faixas` : `${spotifyPreview.tracks.length} faixas`}
+                  </span>
+                </div>
+                <div className="preview-list">
+                  {spotifyPreview.tracks.map((track, index) => (
+                    <div key={`${track.name}-${index}`} className="preview-item">
+                      <span className="preview-index">{String(index + 1).padStart(2, '0')}</span>
+                      <span className="preview-title">{track.name}</span>
+                      <span className="preview-artist">{(track.artists || []).join(', ')}</span>
+                    </div>
+                  ))}
+                </div>
+                {spotifyPreview.total && spotifyPreview.total > spotifyPreview.tracks.length && (
+                  <p className="helper">
+                    Mostrando {spotifyPreview.tracks.length} de {spotifyPreview.total} faixas.
+                  </p>
+                )}
+              </div>
+            )}
+          </>
+        )}
 
         <div className="grid">
           <div>
@@ -159,7 +280,12 @@ export default function App() {
         </div>
 
         <div className="actions">
-          <button className="button primary" type="button" onClick={handleDownload} disabled={!isReady || isDownloading}>
+          <button
+            className="button primary"
+            type="button"
+            onClick={handleDownload}
+            disabled={!isReady || isDownloading || isPreviewing}
+          >
             <span className="button-icon">{isDownloading ? '*' : 'v'}</span>
             <span className="button-content">
               <span className="button-title">{isDownloading ? 'Forjando...' : 'Iniciar download'}</span>

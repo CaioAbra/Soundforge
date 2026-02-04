@@ -104,6 +104,15 @@ body::before {
   word-break: break-word;
 }
 
+.app.compact .preview-header {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.app.compact .preview-list {
+  max-height: 200px;
+}
+
 .hero {
   display: flex;
   align-items: center;
@@ -176,6 +185,86 @@ body::before {
   font-family: 'Cinzel', serif;
   margin-bottom: 12px;
   color: var(--muted);
+}
+
+.helper {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.token-label {
+  margin-top: 18px;
+}
+
+.helper.error {
+  color: #f2a1a1;
+}
+
+.preview-row {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.preview-box {
+  margin-top: 16px;
+  background: #0b0805;
+  border-radius: 12px;
+  padding: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  color: var(--muted);
+}
+
+.preview-header h3 {
+  margin: 0;
+  font-family: 'Cinzel', serif;
+  font-size: 1.05rem;
+  color: var(--ink);
+}
+
+.preview-list {
+  display: grid;
+  gap: 8px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+.preview-item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 12px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.preview-index {
+  font-family: 'Cinzel', serif;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.preview-title {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.preview-artist {
+  grid-column: 2 / -1;
+  color: var(--muted);
+  font-size: 0.85rem;
 }
 
 .input {

@@ -52,15 +52,44 @@ ipcMain.handle('select-output-dir', async () => {
   return result.filePaths[0];
 });
 
+ipcMain.handle('spotify:preview', async (_event, payload) => {
+  const { spotifyToken, spotifyPlaylistUrl } = payload || {};
+  if (!spotifyToken || !spotifyPlaylistUrl) {
+    throw new Error('Token e link da playlist do Spotify são obrigatórios.');
+  }
+
+  const playlistId = extractSpotifyPlaylistId(spotifyPlaylistUrl);
+  if (!playlistId) {
+    throw new Error('Não foi possível identificar o ID da playlist do Spotify.');
+  }
+
+  const previewData = await fetchSpotifyPlaylist(spotifyToken, playlistId, 50);
+  return previewData;
+});
+
 ipcMain.on('download:start', async (event, payload) => {
   try {
-    let { url, outputDir, quality } = payload;
-    if (!url || !outputDir) {
+    const {
+      source = 'youtube',
+      url,
+      outputDir,
+      quality,
+      spotifyToken,
+      spotifyPlaylistUrl
+    } = payload;
+
+    if (source === 'spotify') {
+      if (!spotifyToken || !spotifyPlaylistUrl || !outputDir) {
+        event.sender.send('download:error', 'Token e link da playlist do Spotify são obrigatórios.');
+        return;
+      }
+    } else if (!url || !outputDir) {
       event.sender.send('download:error', 'URL e pasta de destino são obrigatórias.');
       return;
     }
 
-    if (isRadioLikeUrl(url)) {
+    let finalUrl = url;
+    if (source === 'youtube' && isRadioLikeUrl(url)) {
       const normalized = normalizeRadioUrl(url);
       if (!normalized) {
         event.sender.send(
@@ -69,7 +98,7 @@ ipcMain.on('download:start', async (event, payload) => {
         );
         return;
       }
-      url = normalized;
+      finalUrl = normalized;
       event.sender.send(
         'download:log',
         `[AVISO] Link Mix/Radio detectado. Usando o vídeo base: ${normalized}`
@@ -93,7 +122,6 @@ ipcMain.on('download:start', async (event, payload) => {
       );
     }
 
-    const isPlaylist = await detectPlaylist(url, ytDlpBin);
     const progressState = {
       percent: 0,
       speed: '',
@@ -108,83 +136,79 @@ ipcMain.on('download:start', async (event, payload) => {
       event.sender.send('download:progress', progressState);
     };
 
+    if (source === 'spotify') {
+      const playlistId = extractSpotifyPlaylistId(spotifyPlaylistUrl);
+      if (!playlistId) {
+        event.sender.send('download:error', 'Não foi possível identificar o ID da playlist do Spotify.');
+        return;
+      }
+
+      event.sender.send('download:log', '[INFO] Buscando faixas da playlist no Spotify...');
+      const playlistData = await fetchSpotifyPlaylist(spotifyToken, playlistId);
+      const spotifyTracks = playlistData.tracks || [];
+      const playlistName = playlistData.name || 'Spotify Playlist';
+
+      if (spotifyTracks.length === 0) {
+        event.sender.send('download:error', 'Não encontrei faixas na playlist.');
+        return;
+      }
+
+      sendProgress({ itemIndex: 0, itemCount: spotifyTracks.length });
+
+      const safeFolder = sanitizeFileComponent(playlistName);
+      const baseFolder = path.join(outputDir, safeFolder || 'Spotify Playlist');
+
+      for (let index = 0; index < spotifyTracks.length; index += 1) {
+        const track = spotifyTracks[index];
+        const query = buildSpotifyQuery(track);
+        sendProgress({
+          itemIndex: index + 1,
+          itemCount: spotifyTracks.length,
+          title: track.name || query
+        });
+        event.sender.send('download:log', `[INFO] Buscando no YouTube: ${query}`);
+
+        const indexPrefix = String(index + 1).padStart(2, '0');
+        const outputTemplate = path.join(baseFolder, `${indexPrefix} - %(title)s.%(ext)s`);
+        const args = buildYtDlpArgs({
+          outputTemplate,
+          quality,
+          ffmpegLocation,
+          input: `ytsearch1:${query}`,
+          noPlaylist: true
+        });
+
+        const code = await runYtDlp(ytDlpBin, args, event, sendProgress);
+        if (code !== 0) {
+          event.sender.send('download:error', `Falha no download. Código ${code}.`);
+          return;
+        }
+      }
+
+      sendProgress({ percent: 100 });
+      event.sender.send('download:complete', { isPlaylist: true });
+      return;
+    }
+
+    const isPlaylist = await detectPlaylist(finalUrl, ytDlpBin);
     const outputTemplate = isPlaylist
       ? path.join(outputDir, '%(playlist_title)s', '%(title)s.%(ext)s')
       : path.join(outputDir, '%(title)s.%(ext)s');
 
-    const args = [
-      '--extract-audio',
-      '--audio-format', 'mp3',
-      '--audio-quality', String(quality || '5'),
-      '--no-mtime',
-      '--newline',
-      '--output', outputTemplate,
-      url
-    ];
+    const args = buildYtDlpArgs({
+      outputTemplate,
+      quality,
+      ffmpegLocation,
+      input: finalUrl
+    });
 
-    if (ffmpegLocation) {
-      args.unshift('--ffmpeg-location', ffmpegLocation);
+    const code = await runYtDlp(ytDlpBin, args, event, sendProgress);
+    if (code === 0) {
+      sendProgress({ percent: 100 });
+      event.sender.send('download:complete', { isPlaylist });
+    } else {
+      event.sender.send('download:error', `Falha no download. Código ${code}.`);
     }
-
-    const proc = spawn(ytDlpBin, args, {
-      shell: false,
-      env: {
-        ...process.env,
-        PYTHONIOENCODING: 'utf-8',
-        PYTHONUTF8: '1'
-      }
-    });
-
-    const handleOutput = (chunk) => {
-      const text = decodeBuffer(chunk);
-      event.sender.send('download:log', text);
-
-      text
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .forEach((line) => {
-          const itemMatch = line.match(/Downloading item (\d+) of (\d+)/i);
-          if (itemMatch) {
-            sendProgress({
-              itemIndex: Number(itemMatch[1]),
-              itemCount: Number(itemMatch[2])
-            });
-          }
-
-          const destMatch = line.match(/Destination:\s(.+)/i);
-          if (destMatch) {
-            const filename = path.basename(destMatch[1]);
-            const baseTitle = filename.replace(/\.[^/.]+$/, '');
-            sendProgress({ title: safeDecode(baseTitle) });
-          }
-
-          const percentMatch = line.match(/\s(\d{1,3}(?:\.\d+)?)%\s/);
-          if (percentMatch) {
-            sendProgress({ percent: Number(percentMatch[1]) });
-          }
-
-          const speedMatch = line.match(/at\s+([^\s]+)\s+ETA\s+([0-9:]+)/i);
-          if (speedMatch) {
-            sendProgress({
-              speed: speedMatch[1],
-              eta: speedMatch[2]
-            });
-          }
-        });
-    };
-
-    proc.stdout.on('data', handleOutput);
-    proc.stderr.on('data', handleOutput);
-
-    proc.on('close', (code) => {
-      if (code === 0) {
-        sendProgress({ percent: 100 });
-        event.sender.send('download:complete', { isPlaylist });
-      } else {
-        event.sender.send('download:error', `Falha no download. Código ${code}.`);
-      }
-    });
   } catch (err) {
     event.sender.send('download:error', err?.message || 'Erro inesperado.');
   }
@@ -341,6 +365,87 @@ function decodeBuffer(buffer) {
   return latin1Text || utf8Text;
 }
 
+function buildYtDlpArgs({ outputTemplate, quality, ffmpegLocation, input, noPlaylist = false }) {
+  const args = [
+    '--extract-audio',
+    '--audio-format', 'mp3',
+    '--audio-quality', String(quality || '5'),
+    '--no-mtime',
+    '--newline',
+    '--output', outputTemplate
+  ];
+
+  if (noPlaylist) {
+    args.push('--no-playlist');
+  }
+
+  if (ffmpegLocation) {
+    args.unshift('--ffmpeg-location', ffmpegLocation);
+  }
+
+  args.push(input);
+  return args;
+}
+
+function runYtDlp(ytDlpBin, args, event, sendProgress) {
+  return new Promise((resolve) => {
+    const proc = spawn(ytDlpBin, args, {
+      shell: false,
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUTF8: '1'
+      }
+    });
+
+    const handleOutput = (chunk) => {
+      const text = decodeBuffer(chunk);
+      event.sender.send('download:log', text);
+
+      text
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .forEach((line) => {
+          const itemMatch = line.match(/Downloading item (\d+) of (\d+)/i);
+          if (itemMatch) {
+            sendProgress({
+              itemIndex: Number(itemMatch[1]),
+              itemCount: Number(itemMatch[2])
+            });
+          }
+
+          const destMatch = line.match(/Destination:\s(.+)/i);
+          if (destMatch) {
+            const filename = path.basename(destMatch[1]);
+            const baseTitle = filename.replace(/\.[^/.]+$/, '');
+            sendProgress({ title: safeDecode(baseTitle) });
+          }
+
+          const percentMatch = line.match(/\s(\d{1,3}(?:\.\d+)?)%\s/);
+          if (percentMatch) {
+            sendProgress({ percent: Number(percentMatch[1]) });
+          }
+
+          const speedMatch = line.match(/at\s+([^\s]+)\s+ETA\s+([0-9:]+)/i);
+          if (speedMatch) {
+            sendProgress({
+              speed: speedMatch[1],
+              eta: speedMatch[2]
+            });
+          }
+        });
+    };
+
+    proc.stdout.on('data', handleOutput);
+    proc.stderr.on('data', handleOutput);
+
+    proc.on('close', (code) => {
+      resolve(code);
+    });
+  });
+}
+
 function isRadioLikeUrl(url) {
   if (!url || typeof url !== 'string') return false;
   const normalized = url.trim().toLowerCase();
@@ -382,6 +487,116 @@ function extractVideoId(inputUrl) {
   }
 
   return null;
+}
+
+function extractSpotifyPlaylistId(inputUrl) {
+  if (!inputUrl || typeof inputUrl !== 'string') return null;
+  const trimmed = inputUrl.trim();
+
+  const uriMatch = trimmed.match(/^spotify:playlist:([a-zA-Z0-9]+)$/);
+  if (uriMatch) return uriMatch[1];
+
+  try {
+    const parsed = new URL(trimmed);
+    if (!parsed.hostname.includes('spotify.com')) return null;
+    const parts = parsed.pathname.split('/').filter(Boolean);
+    const playlistIndex = parts.findIndex((part) => part === 'playlist');
+    if (playlistIndex !== -1 && parts[playlistIndex + 1]) {
+      return parts[playlistIndex + 1];
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+async function fetchSpotifyPlaylist(token, playlistId, maxTracks = null) {
+  const playlist = await fetchSpotifyApi(
+    `/v1/playlists/${playlistId}?fields=name`,
+    token
+  );
+  const tracks = [];
+  let offset = 0;
+  const limit = 100;
+  let total = 0;
+
+  while (true) {
+    const data = await fetchSpotifyApi(
+      `/v1/playlists/${playlistId}/tracks?limit=${limit}&offset=${offset}&fields=items(track(name,artists(name))),total`,
+      token
+    );
+    total = data.total || total;
+    const items = Array.isArray(data.items) ? data.items : [];
+    items.forEach((item) => {
+      if (!item || !item.track) return;
+      const name = item.track.name || '';
+      const artists = Array.isArray(item.track.artists)
+        ? item.track.artists.map((artist) => artist.name).filter(Boolean)
+        : [];
+      if (name) tracks.push({ name, artists });
+    });
+
+    if (maxTracks && tracks.length >= maxTracks) {
+      tracks.length = maxTracks;
+      break;
+    }
+
+    offset += limit;
+    if (!data.total || offset >= data.total || items.length === 0) break;
+  }
+
+  return { name: playlist?.name, tracks, total };
+}
+
+function fetchSpotifyApi(endpoint, token) {
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: 'api.spotify.com',
+      path: endpoint,
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => {
+        data += chunk.toString('utf8');
+      });
+      res.on('end', () => {
+        if (res.statusCode !== 200) {
+          if (res.statusCode === 401) {
+            reject(new Error('Token do Spotify expirou ou é inválido.'));
+            return;
+          }
+          reject(new Error(`Spotify API retornou HTTP ${res.statusCode}.`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(data));
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
+
+    req.on('error', (err) => reject(err));
+    req.end();
+  });
+}
+
+function buildSpotifyQuery(track) {
+  if (!track) return '';
+  const artists = Array.isArray(track.artists) ? track.artists.join(' ') : '';
+  return `${track.name} ${artists}`.trim();
+}
+
+function sanitizeFileComponent(value) {
+  if (!value || typeof value !== 'string') return '';
+  return value.replace(/[<>:"/\\|?*\x00-\x1F]/g, '').trim();
 }
 
 function detectPlaylist(url, ytDlpBin) {
