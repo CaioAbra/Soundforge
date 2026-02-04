@@ -2,6 +2,7 @@
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
+const https = require('https');
 const iconv = require('iconv-lite');
 
 const isDev = !app.isPackaged;
@@ -59,11 +60,11 @@ ipcMain.on('download:start', async (event, payload) => {
       return;
     }
 
-    const ytDlpBin = resolveYtDlpBinary();
+    const ytDlpBin = await ensureYtDlpBinary(event);
     if (!ytDlpBin) {
       event.sender.send(
         'download:error',
-        'Não encontrei o yt-dlp.exe. Coloque em resources/yt-dlp/yt-dlp.exe.'
+        'Não foi possível preparar o yt-dlp automaticamente. Verifique sua conexão ou configure YTDLP_BIN.'
       );
       return;
     }
@@ -178,6 +179,9 @@ function resolveYtDlpBinary() {
     return process.env.YTDLP_BIN;
   }
 
+  const userCandidate = getUserYtDlpBinaryPath();
+  if (fs.existsSync(userCandidate)) return userCandidate;
+
   const devCandidate = path.join(app.getAppPath(), 'resources', 'yt-dlp', 'yt-dlp.exe');
   if (fs.existsSync(devCandidate)) return devCandidate;
 
@@ -185,6 +189,103 @@ function resolveYtDlpBinary() {
   if (fs.existsSync(prodCandidate)) return prodCandidate;
 
   return null;
+}
+
+function getUserYtDlpDir() {
+  return path.join(app.getPath('userData'), 'yt-dlp');
+}
+
+function getUserYtDlpBinaryPath() {
+  return path.join(getUserYtDlpDir(), 'yt-dlp.exe');
+}
+
+async function ensureYtDlpBinary(event) {
+  const existing = resolveYtDlpBinary();
+  if (existing) return existing;
+
+  const targetDir = getUserYtDlpDir();
+  const targetPath = getUserYtDlpBinaryPath();
+
+  event?.sender.send(
+    'download:log',
+    '[INFO] yt-dlp não encontrado. Baixando automaticamente para o perfil do usuário.'
+  );
+
+  await fs.promises.mkdir(targetDir, { recursive: true });
+  await downloadFile(
+    'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe',
+    targetPath,
+    event
+  );
+
+  try {
+    fs.chmodSync(targetPath, 0o755);
+  } catch {
+    // Ignora erros de permissão no Windows.
+  }
+
+  return targetPath;
+}
+
+function downloadFile(url, dest, event) {
+  const tempDest = `${dest}.tmp`;
+  return new Promise((resolve, reject) => {
+    const request = https.get(url, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume();
+        downloadFile(res.headers.location, dest, event).then(resolve).catch(reject);
+        return;
+      }
+
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error(`Falha ao baixar yt-dlp (HTTP ${res.statusCode}).`));
+        return;
+      }
+
+      const total = Number(res.headers['content-length'] || 0);
+      let received = 0;
+      let lastPercent = -1;
+
+      const file = fs.createWriteStream(tempDest);
+      res.on('data', (chunk) => {
+        received += chunk.length;
+        if (event && total) {
+          const percent = Math.floor((received / total) * 100);
+          if (percent === 100 || percent >= lastPercent + 5) {
+            lastPercent = percent;
+            event.sender.send('download:log', `[INFO] Baixando yt-dlp... ${percent}%`);
+          }
+        }
+      });
+
+      res.pipe(file);
+
+      file.on('finish', () => {
+        file.close(async () => {
+          try {
+            await fs.promises.rename(tempDest, dest);
+            resolve();
+          } catch (err) {
+            reject(err);
+          }
+        });
+      });
+
+      file.on('error', (err) => {
+        res.destroy();
+        file.close(() => {
+          fs.promises.unlink(tempDest).catch(() => {});
+          reject(err);
+        });
+      });
+    });
+
+    request.on('error', (err) => {
+      fs.promises.unlink(tempDest).catch(() => {});
+      reject(err);
+    });
+  });
 }
 
 function resolveFfmpegLocation() {
