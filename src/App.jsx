@@ -1,4 +1,5 @@
 ﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { GiAnvil, GiThorHammer } from 'react-icons/gi';
 
 const QUALITY_OPTIONS = [
   { label: '0 (Melhor)', value: '0' },
@@ -52,6 +53,7 @@ export default function App() {
   const trackLabel = progress.title || (isDownloading ? 'Invocando faixa...' : 'Nenhuma faixa em execução');
   const playlistLabel =
     progress.itemIndex && progress.itemCount ? `Faixa ${progress.itemIndex} de ${progress.itemCount}` : null;
+  const forgeStateLabel = isDownloading ? 'Forja ativa' : 'Forja em repouso';
   const decodeLine = (line) => {
     if (!line || typeof line !== 'string') return line;
     try {
@@ -157,37 +159,46 @@ export default function App() {
   return (
     <div className={`app ${isCompact ? 'compact' : ''}`}>
       <header className="hero">
-        <div>
+        <div className="hero-copy">
           <p className="eyebrow">Forja Sonora</p>
           <h1>Soundforge</h1>
           <p className="subtitle">Baixe canções do reino do YouTube com qualidade à sua escolha.</p>
         </div>
-        <div className="crest">
-          <span>SF</span>
+        <div className={`crest anvil-crest ${isDownloading ? 'forging' : ''}`} aria-hidden="true">
+          <div className="forge-stage">
+            <GiAnvil className="forge-anvil" />
+            <GiThorHammer className="forge-hammer" />
+            <span className="spark spark-a">✦</span>
+            <span className="spark spark-b">✦</span>
+            <span className="spark spark-c">✦</span>
+          </div>
+          <span className="crest-state">{forgeStateLabel}</span>
         </div>
       </header>
 
       <section className="panel">
-        <label className="label">Fonte</label>
-        <div className="select-row">
-          {SOURCE_OPTIONS.map((option) => (
-            <label key={option.value} className={`radio ${source === option.value ? 'active' : ''}`}>
-              <input
-                type="radio"
-                name="source"
-                value={option.value}
-                checked={source === option.value}
-                onChange={() => setSource(option.value)}
-              />
-              <span>{option.label}</span>
-            </label>
-          ))}
+        <div className="source-block">
+          <label className="label">Fonte</label>
+          <div className="select-row">
+            {SOURCE_OPTIONS.map((option) => (
+              <label key={option.value} className={`radio ${source === option.value ? 'active' : ''}`}>
+                <input
+                  type="radio"
+                  name="source"
+                  value={option.value}
+                  checked={source === option.value}
+                  onChange={() => setSource(option.value)}
+                />
+                <span>{option.label}</span>
+              </label>
+            ))}
+          </div>
         </div>
 
         {source === 'youtube' ? (
-        <label className="label">Link do YouTube</label>
+        <label className="label link-label">Link do YouTube</label>
         ) : (
-        <label className="label">Link da playlist do Spotify</label>
+        <label className="label link-label">Link da playlist do Spotify</label>
         )}
         <input
           className="input"
@@ -337,4 +348,3 @@ export default function App() {
     </div>
   );
 }
-
