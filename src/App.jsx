@@ -314,39 +314,40 @@ export default function App() {
         </div>
       </section>
 
-      <section className="panel progress-card">
-        <div className="progress-header">
-          <h2>Progresso da forja</h2>
-          <span className="progress-pill">{playlistLabel || 'Faixa única'}</span>
-        </div>
-        <p className="progress-track">{trackLabel}</p>
-        <div className="progress-bar" role="progressbar" aria-valuenow={progressPercent} aria-valuemin={0} aria-valuemax={100}>
-          <div className="progress-fill" style={{ width: `${progressPercent}%` }} />
-        </div>
-        <div className="progress-meta">
-          <span>{progressLabel}</span>
-          <span>{progress.speed ? `Velocidade ${progress.speed}` : 'Velocidade --'}</span>
-          <span>{progress.eta ? `ETA ${progress.eta}` : 'ETA --'}</span>
-        </div>
-      </section>
+      <div className="progress-logs-grid">
+        <section className="panel progress-card">
+          <div className="progress-header">
+            <h2>Progresso da forja</h2>
+            <span className="progress-pill">{playlistLabel || 'Faixa única'}</span>
+          </div>
+          <p className="progress-track">{trackLabel}</p>
+          <div className="progress-bar" role="progressbar" aria-valuenow={progressPercent} aria-valuemin={0} aria-valuemax={100}>
+            <div className="progress-fill" style={{ width: `${progressPercent}%` }} />
+          </div>
+          <div className="progress-meta">
+            <span>{progressLabel}</span>
+            <span>{progress.speed ? `Velocidade ${progress.speed}` : 'Velocidade --'}</span>
+            <span>{progress.eta ? `ETA ${progress.eta}` : 'ETA --'}</span>
+          </div>
+        </section>
 
-      <section className="panel logs">
-        <div className="logs-header">
-          <h2>Relatório da forja</h2>
-          <p>Saída do yt-dlp e etapas do ritual.</p>
-        </div>
-        <div className="log-box" ref={logBoxRef}>
-          {logs.length === 0 ? (
-            <p className="log-empty">Nenhuma mensagem ainda.</p>
-          ) : (
-            logs.map((line, index) => (
-              <div key={`${line}-${index}`} className="log-line">
-                {line}
-              </div>
-            ))
-          )}
-        </div>
-      </section>
+        <section className="panel logs">
+          <div className="logs-header">
+            <h2>Relatório da forja</h2>
+          </div>
+          <div className="log-box" ref={logBoxRef}>
+            {logs.length === 0 ? (
+              <p className="log-empty">Nenhuma mensagem ainda.</p>
+            ) : (
+              logs.map((line, index) => (
+                <div key={`${line}-${index}`} className="log-line">
+                  {line}
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+      </div>
     </div>
   );
 }
