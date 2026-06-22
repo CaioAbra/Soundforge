@@ -76,8 +76,10 @@ export default function App() {
     });
 
     window.soundforge.onComplete(({ isPlaylist }) => {
+      const completeMessage = isPlaylist ? 'Download da playlist concluído.' : 'Download concluído.';
       setIsDownloading(false);
       setStatus(isPlaylist ? 'Playlist forjada com sucesso.' : 'Música forjada com sucesso.');
+      setLogs([completeMessage]);
       setProgress((prev) => ({ ...prev, percent: 100 }));
     });
 

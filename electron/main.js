@@ -88,22 +88,7 @@ ipcMain.on('download:start', async (event, payload) => {
       return;
     }
 
-    let finalUrl = url;
-    if (source === 'youtube' && isRadioLikeUrl(url)) {
-      const normalized = normalizeRadioUrl(url);
-      if (!normalized) {
-        event.sender.send(
-          'download:error',
-          'Não foi possível extrair o vídeo base do Mix/Radio. Use o link do vídeo ou playlist.'
-        );
-        return;
-      }
-      finalUrl = normalized;
-      event.sender.send(
-        'download:log',
-        `[AVISO] Link Mix/Radio detectado. Usando o vídeo base: ${normalized}`
-      );
-    }
+    const finalUrl = typeof url === 'string' ? url.trim() : url;
 
     const ytDlpBin = await ensureYtDlpBinary(event);
     if (!ytDlpBin) {
@@ -190,7 +175,8 @@ ipcMain.on('download:start', async (event, payload) => {
       return;
     }
 
-    const isPlaylist = await detectPlaylist(finalUrl, ytDlpBin);
+    const youtubePlaylistInfo = await inspectYoutubePlaylistUrl(finalUrl, ytDlpBin, event, sendProgress);
+    const isPlaylist = youtubePlaylistInfo.isPlaylist || await detectPlaylist(finalUrl, ytDlpBin);
     const outputTemplate = isPlaylist
       ? path.join(outputDir, '%(playlist_title)s', '%(title)s.%(ext)s')
       : path.join(outputDir, '%(title)s.%(ext)s');
@@ -199,7 +185,8 @@ ipcMain.on('download:start', async (event, payload) => {
       outputTemplate,
       quality,
       ffmpegLocation,
-      input: finalUrl
+      input: finalUrl,
+      yesPlaylist: isPlaylist
     });
 
     const code = await runYtDlp(ytDlpBin, args, event, sendProgress);
@@ -365,7 +352,7 @@ function decodeBuffer(buffer) {
   return latin1Text || utf8Text;
 }
 
-function buildYtDlpArgs({ outputTemplate, quality, ffmpegLocation, input, noPlaylist = false }) {
+function buildYtDlpArgs({ outputTemplate, quality, ffmpegLocation, input, noPlaylist = false, yesPlaylist = false }) {
   const args = [
     '--extract-audio',
     '--audio-format', 'mp3',
@@ -377,6 +364,10 @@ function buildYtDlpArgs({ outputTemplate, quality, ffmpegLocation, input, noPlay
 
   if (noPlaylist) {
     args.push('--no-playlist');
+  }
+
+  if (yesPlaylist) {
+    args.push('--yes-playlist');
   }
 
   if (ffmpegLocation) {
@@ -446,47 +437,97 @@ function runYtDlp(ytDlpBin, args, event, sendProgress) {
   });
 }
 
-function isRadioLikeUrl(url) {
-  if (!url || typeof url !== 'string') return false;
-  const normalized = url.trim().toLowerCase();
-  if (normalized.includes('/mix/') || normalized.includes('mix?')) return true;
-  if (/[?&]start_radio=1/.test(normalized)) return true;
-  if (/[?&]radio=1/.test(normalized)) return true;
-  if (/[?&]list=rd[a-z0-9_]*/.test(normalized)) return true;
-  return false;
-}
+function inspectYoutubeUrl(inputUrl) {
+  const info = {
+    hasPlaylist: false,
+    isRadio: false,
+    playlistId: null
+  };
 
-function normalizeRadioUrl(inputUrl) {
-  const videoId = extractVideoId(inputUrl);
-  if (!videoId) return null;
-  return `https://www.youtube.com/watch?v=${videoId}`;
-}
-
-function extractVideoId(inputUrl) {
-  if (!inputUrl || typeof inputUrl !== 'string') return null;
+  if (!inputUrl || typeof inputUrl !== 'string') return info;
   try {
     const parsed = new URL(inputUrl);
+    const playlistId = parsed.searchParams.get('list');
+    const startRadio = parsed.searchParams.get('start_radio') === '1';
+    const radioParam = parsed.searchParams.get('radio') === '1';
+    const hasMixPath = parsed.pathname.toLowerCase().includes('/mix/');
 
-    const vParam = parsed.searchParams.get('v');
-    if (vParam) return vParam;
+    info.playlistId = playlistId;
+    info.hasPlaylist = Boolean(playlistId);
+    info.isRadio = startRadio || radioParam || hasMixPath || Boolean(playlistId && /^rd/i.test(playlistId));
 
-    const path = parsed.pathname || '';
-    const mixIndex = path.toLowerCase().indexOf('/mix/');
-    if (mixIndex !== -1) {
-      const afterMix = path.slice(mixIndex + 5);
-      const candidate = afterMix.split('/')[0];
-      if (candidate) return candidate;
-    }
-
-    if (parsed.hostname === 'youtu.be') {
-      const candidate = path.replace(/^\//, '').split('/')[0];
-      return candidate || null;
-    }
+    return info;
   } catch {
-    return null;
+    return info;
+  }
+}
+
+async function inspectYoutubePlaylistUrl(inputUrl, ytDlpBin, event, sendProgress) {
+  const urlInfo = inspectYoutubeUrl(inputUrl);
+  if (!urlInfo.hasPlaylist && !urlInfo.isRadio) {
+    return { isPlaylist: false, itemCount: null };
   }
 
-  return null;
+  const kindLabel = urlInfo.isRadio ? 'Radio/Mix do YouTube' : 'playlist do YouTube';
+  event.sender.send('download:log', `[INFO] ${kindLabel} detectado. Mantendo o link como playlist.`);
+
+  const itemCount = await countYoutubePlaylistEntries(inputUrl, ytDlpBin);
+  if (itemCount) {
+    sendProgress({ itemIndex: 0, itemCount });
+    event.sender.send('download:log', `[INFO] ${itemCount} itens encontrados na lista.`);
+  } else if (urlInfo.isRadio) {
+    event.sender.send(
+      'download:log',
+      '[INFO] O YouTube Radio não informou um total fixo. O progresso será atualizado conforme os itens forem baixados.'
+    );
+  }
+
+  return { isPlaylist: true, itemCount };
+}
+
+function countYoutubePlaylistEntries(inputUrl, ytDlpBin) {
+  return new Promise((resolve) => {
+    if (!ytDlpBin) {
+      resolve(null);
+      return;
+    }
+
+    const proc = spawn(ytDlpBin, ['--flat-playlist', '--print', '%(playlist_index)s', inputUrl], {
+      shell: false,
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUTF8: '1'
+      }
+    });
+
+    let lastIndex = null;
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+
+    const timer = setTimeout(() => {
+      proc.kill();
+      finish(lastIndex);
+    }, 20000);
+
+    proc.stdout.on('data', (chunk) => {
+      decodeBuffer(chunk)
+        .split(/\r?\n/)
+        .map((line) => Number(line.trim()))
+        .filter((value) => Number.isInteger(value) && value > 0)
+        .forEach((value) => {
+          lastIndex = value;
+        });
+    });
+
+    proc.on('error', () => finish(lastIndex));
+    proc.on('close', () => finish(lastIndex));
+  });
 }
 
 function extractSpotifyPlaylistId(inputUrl) {

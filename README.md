@@ -10,7 +10,7 @@ App Electron + React com tema medieval para baixar músicas do YouTube como MP3.
 - Download automático do `yt-dlp` no primeiro uso (sem binário no repositório).
 - Suporte a playlists do Spotify via token temporário (busca no YouTube por faixa).
 - Prévia de playlist do Spotify (lista de faixas).
-- Detecção e normalização de links Mix/Radio do YouTube.
+- Detecção de links Mix/Radio do YouTube como playlist, com contagem dos itens quando disponível.
 - UI/UX do botão principal e responsividade melhoradas (modo compacto automático).
 
 ## Observações importantes

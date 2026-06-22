@@ -5,10 +5,10 @@
   "main": "electron/main.js",
   "type": "commonjs",
   "scripts": {
-    "dev": "concurrently \"vite\" \"wait-on tcp:5173 && electron .\"",
+    "dev": "concurrently \"vite\" \"wait-on tcp:5173 && node scripts/run-electron.js .\"",
     "build": "vite build",
     "preview": "vite preview",
-    "electron": "electron ."
+    "electron": "node scripts/run-electron.js ."
   },
   "dependencies": {
     "iconv-lite": "^0.6.3",
