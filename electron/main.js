@@ -6,6 +6,12 @@ const https = require('https');
 const iconv = require('iconv-lite');
 
 const isDev = !app.isPackaged;
+const SPOTIFY_TRACK_SOURCES = [
+  { label: 'YouTube', inputPrefix: 'ytsearch1' },
+  { label: 'SoundCloud', inputPrefix: 'scsearch1' },
+  { label: 'Google Video', inputPrefix: 'gvsearch1' },
+  { label: 'Yahoo Video', inputPrefix: 'yvsearch1' }
+];
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -142,6 +148,8 @@ ipcMain.on('download:start', async (event, payload) => {
 
       const safeFolder = sanitizeFileComponent(playlistName);
       const baseFolder = path.join(outputDir, safeFolder || 'Spotify Playlist');
+      const downloadedTracks = [];
+      const skippedTracks = [];
 
       for (let index = 0; index < spotifyTracks.length; index += 1) {
         const track = spotifyTracks[index];
@@ -151,27 +159,59 @@ ipcMain.on('download:start', async (event, payload) => {
           itemCount: spotifyTracks.length,
           title: track.name || query
         });
-        event.sender.send('download:log', `[INFO] Buscando no YouTube: ${query}`);
 
         const indexPrefix = String(index + 1).padStart(2, '0');
-        const outputTemplate = path.join(baseFolder, `${indexPrefix} - %(title)s.%(ext)s`);
-        const args = buildYtDlpArgs({
+        const outputBase = buildSpotifyOutputBase(track, indexPrefix);
+        const outputTemplate = path.join(baseFolder, `${outputBase}.%(ext)s`);
+        const outputFile = path.join(baseFolder, `${outputBase}.mp3`);
+        const downloaded = await downloadSpotifyTrack({
+          ytDlpBin,
           outputTemplate,
           quality,
           ffmpegLocation,
-          input: `ytsearch1:${query}`,
-          noPlaylist: true
+          query,
+          event,
+          sendProgress
         });
 
-        const code = await runYtDlp(ytDlpBin, args, event, sendProgress);
-        if (code !== 0) {
-          event.sender.send('download:error', `Falha no download. Código ${code}.`);
-          return;
+        if (!downloaded.ok) {
+          const skippedTrack = {
+            index: index + 1,
+            name: track.name || query,
+            artists: Array.isArray(track.artists) ? track.artists : [],
+            query,
+            reason: downloaded.reason,
+            sources: downloaded.sources
+          };
+          skippedTracks.push(skippedTrack);
+          event.sender.send('download:track-skipped', skippedTrack);
+          event.sender.send('download:log', `[AVISO] Faixa pulada: ${query}. Motivo: ${downloaded.reason}`);
+          continue;
         }
+
+        await writeMp3Metadata({
+          ffmpegLocation,
+          filePath: outputFile,
+          track,
+          playlistName,
+          trackNumber: index + 1,
+          trackTotal: spotifyTracks.length,
+          event
+        });
+
+        const downloadedTrack = {
+          index: index + 1,
+          name: track.name || query,
+          artists: Array.isArray(track.artists) ? track.artists : [],
+          source: downloaded.source,
+          filePath: outputFile
+        };
+        downloadedTracks.push(downloadedTrack);
+        event.sender.send('download:track-complete', downloadedTrack);
       }
 
       sendProgress({ percent: 100 });
-      event.sender.send('download:complete', { isPlaylist: true });
+      event.sender.send('download:complete', { isPlaylist: true, downloadedTracks, skippedTracks });
       return;
     }
 
@@ -357,6 +397,7 @@ function buildYtDlpArgs({ outputTemplate, quality, ffmpegLocation, input, noPlay
     '--extract-audio',
     '--audio-format', 'mp3',
     '--audio-quality', String(quality || '5'),
+    '--embed-metadata',
     '--no-mtime',
     '--newline',
     '--output', outputTemplate
@@ -376,6 +417,36 @@ function buildYtDlpArgs({ outputTemplate, quality, ffmpegLocation, input, noPlay
 
   args.push(input);
   return args;
+}
+
+async function downloadSpotifyTrack({ ytDlpBin, outputTemplate, quality, ffmpegLocation, query, event, sendProgress }) {
+  const attempts = [];
+
+  for (const source of SPOTIFY_TRACK_SOURCES) {
+    event.sender.send('download:log', `[INFO] Caçando em ${source.label}: ${query}`);
+    const args = buildYtDlpArgs({
+      outputTemplate,
+      quality,
+      ffmpegLocation,
+      input: `${source.inputPrefix}:${query}`,
+      noPlaylist: true
+    });
+
+    const code = await runYtDlp(ytDlpBin, args, event, sendProgress);
+    if (code === 0) {
+      event.sender.send('download:log', `[INFO] Fonte encontrada: ${source.label}.`);
+      return { ok: true, source: source.label, sources: attempts.concat(source.label) };
+    }
+
+    attempts.push(source.label);
+    event.sender.send('download:log', `[INFO] ${source.label} não entregou essa faixa. Tentando outra fonte...`);
+  }
+
+  return {
+    ok: false,
+    reason: `nenhuma fonte retornou download válido (${attempts.join(', ')})`,
+    sources: attempts
+  };
 }
 
 function runYtDlp(ytDlpBin, args, event, sendProgress) {
@@ -553,9 +624,21 @@ function extractSpotifyPlaylistId(inputUrl) {
 }
 
 async function fetchSpotifyPlaylist(token, playlistId, maxTracks = null) {
+  try {
+    return await fetchSpotifyPlaylistFromApi(token, playlistId, maxTracks);
+  } catch (err) {
+    if (err?.statusCode === 404) {
+      return fetchSpotifyEmbedPlaylist(playlistId, maxTracks);
+    }
+    throw err;
+  }
+}
+
+async function fetchSpotifyPlaylistFromApi(token, playlistId, maxTracks = null) {
   const playlist = await fetchSpotifyApi(
     `/v1/playlists/${playlistId}?fields=name`,
-    token
+    token,
+    { playlistId }
   );
   const tracks = [];
   let offset = 0;
@@ -565,7 +648,8 @@ async function fetchSpotifyPlaylist(token, playlistId, maxTracks = null) {
   while (true) {
     const data = await fetchSpotifyApi(
       `/v1/playlists/${playlistId}/tracks?limit=${limit}&offset=${offset}&fields=items(track(name,artists(name))),total`,
-      token
+      token,
+      { playlistId }
     );
     total = data.total || total;
     const items = Array.isArray(data.items) ? data.items : [];
@@ -590,14 +674,126 @@ async function fetchSpotifyPlaylist(token, playlistId, maxTracks = null) {
   return { name: playlist?.name, tracks, total };
 }
 
-function fetchSpotifyApi(endpoint, token) {
+async function fetchSpotifyEmbedPlaylist(playlistId, maxTracks = null) {
+  const html = await fetchSpotifyEmbedHtml(playlistId);
+  const match = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
+  if (!match) {
+    throw new Error('O Spotify bloqueou a API e não consegui ler a prévia pública da playlist.');
+  }
+
+  let entity;
+  try {
+    const data = JSON.parse(match[1]);
+    entity = data?.props?.pageProps?.state?.data?.entity;
+  } catch {
+    throw new Error('O Spotify bloqueou a API e retornou uma prévia pública em formato inesperado.');
+  }
+
+  const trackList = Array.isArray(entity?.trackList) ? entity.trackList : [];
+  const tracks = trackList
+    .map((track) => ({
+      name: track?.title || '',
+      artists: track?.subtitle ? [track.subtitle] : []
+    }))
+    .filter((track) => track.name);
+
+  if (maxTracks && tracks.length > maxTracks) {
+    tracks.length = maxTracks;
+  }
+
+  if (tracks.length === 0) {
+    throw new Error('O Spotify bloqueou a API e a prévia pública não trouxe faixas.');
+  }
+
+  return {
+    name: entity?.name || entity?.title || 'Spotify Playlist',
+    tracks,
+    total: trackList.length || tracks.length
+  };
+}
+
+function fetchSpotifyEmbedHtml(playlistId) {
   return new Promise((resolve, reject) => {
+    const options = {
+      hostname: 'open.spotify.com',
+      path: `/embed/playlist/${encodeURIComponent(playlistId)}`,
+      method: 'GET',
+      headers: {
+        Accept: 'text/html',
+        'User-Agent': 'Mozilla/5.0 Soundforge'
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => {
+        data += chunk.toString('utf8');
+      });
+      res.on('end', () => {
+        if (res.statusCode !== 200) {
+          reject(new Error(`Spotify embed retornou HTTP ${res.statusCode}.`));
+          return;
+        }
+        resolve(data);
+      });
+    });
+
+    req.on('error', (err) => reject(err));
+    req.end();
+  });
+}
+
+function normalizeSpotifyToken(token) {
+  return String(token || '').trim().replace(/^Bearer\s+/i, '').trim();
+}
+
+function parseSpotifyApiError(data) {
+  try {
+    const parsed = JSON.parse(data);
+    return parsed?.error?.message || parsed?.error_description || '';
+  } catch {
+    return '';
+  }
+}
+
+function buildSpotifyApiError(statusCode, data, context = {}) {
+  const spotifyMessage = parseSpotifyApiError(data);
+  const makeError = (message) => {
+    const err = new Error(message);
+    err.statusCode = statusCode;
+    err.spotifyMessage = spotifyMessage;
+    err.context = context;
+    return err;
+  };
+
+  if (statusCode === 400) {
+    return makeError(spotifyMessage || 'A requisição para o Spotify não foi aceita. Confira se você colou um access token válido, não o Client ID ou Client Secret.');
+  }
+  if (statusCode === 401) {
+    return makeError('Token do Spotify expirou ou é inválido. Gere um access token novo e cole somente o token, com ou sem "Bearer".');
+  }
+  if (statusCode === 403) {
+    return makeError(spotifyMessage || 'O token do Spotify não tem permissão para ler essa playlist.');
+  }
+  if (statusCode === 404) {
+    const suffix = context.playlistId ? ` ID lido: ${context.playlistId}.` : '';
+    return makeError(`O Spotify não liberou essa playlist pela Web API ou ela não existe para esse token.${suffix} Playlists algorítmicas/editoriais do Spotify podem retornar 404 mesmo abrindo no navegador.`);
+  }
+  if (statusCode === 429) {
+    return makeError('O Spotify limitou as requisições agora. Aguarde um pouco e tente novamente.');
+  }
+  return makeError(spotifyMessage || `Spotify API retornou HTTP ${statusCode}.`);
+}
+
+function fetchSpotifyApi(endpoint, token, context = {}) {
+  return new Promise((resolve, reject) => {
+    const accessToken = normalizeSpotifyToken(token);
     const options = {
       hostname: 'api.spotify.com',
       path: endpoint,
       method: 'GET',
       headers: {
-        Authorization: `Bearer ${token}`,
+        Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json'
       }
     };
@@ -609,11 +805,7 @@ function fetchSpotifyApi(endpoint, token) {
       });
       res.on('end', () => {
         if (res.statusCode !== 200) {
-          if (res.statusCode === 401) {
-            reject(new Error('Token do Spotify expirou ou é inválido.'));
-            return;
-          }
-          reject(new Error(`Spotify API retornou HTTP ${res.statusCode}.`));
+          reject(buildSpotifyApiError(res.statusCode, data, context));
           return;
         }
         try {
@@ -635,9 +827,80 @@ function buildSpotifyQuery(track) {
   return `${track.name} ${artists}`.trim();
 }
 
+function buildSpotifyOutputBase(track, indexPrefix) {
+  const artists = Array.isArray(track?.artists) ? track.artists.join(', ') : '';
+  const title = sanitizeFileComponent(track?.name || 'Faixa');
+  const artistSuffix = sanitizeFileComponent(artists);
+  const name = artistSuffix ? `${title} - ${artistSuffix}` : title;
+  return `${indexPrefix} - ${(name || 'Faixa').slice(0, 150)}`;
+}
+
 function sanitizeFileComponent(value) {
   if (!value || typeof value !== 'string') return '';
   return value.replace(/[<>:"/\\|?*\x00-\x1F]/g, '').trim();
+}
+
+function resolveFfmpegBinary(ffmpegLocation) {
+  if (!ffmpegLocation) return null;
+  const windowsCandidate = path.join(ffmpegLocation, 'ffmpeg.exe');
+  if (fs.existsSync(windowsCandidate)) return windowsCandidate;
+  const unixCandidate = path.join(ffmpegLocation, 'ffmpeg');
+  if (fs.existsSync(unixCandidate)) return unixCandidate;
+  return null;
+}
+
+async function writeMp3Metadata({ ffmpegLocation, filePath, track, playlistName, trackNumber, trackTotal, event }) {
+  const ffmpegBin = resolveFfmpegBinary(ffmpegLocation);
+  if (!ffmpegBin || !filePath || !fs.existsSync(filePath)) return;
+
+  const artists = Array.isArray(track?.artists) ? track.artists.filter(Boolean).join(', ') : '';
+  const tempPath = `${filePath}.metadata.tmp.mp3`;
+  const args = [
+    '-y',
+    '-i', filePath,
+    '-map', '0',
+    '-codec', 'copy',
+    '-id3v2_version', '3',
+    '-metadata', `title=${track?.name || ''}`,
+    '-metadata', `artist=${artists}`,
+    '-metadata', `album=${playlistName || 'Spotify Playlist'}`,
+    '-metadata', `track=${trackNumber}/${trackTotal}`,
+    tempPath
+  ];
+
+  try {
+    await runProcess(ffmpegBin, args);
+    await fs.promises.copyFile(tempPath, filePath);
+    await fs.promises.unlink(tempPath).catch(() => {});
+    event?.sender.send('download:log', `[INFO] Metadados gravados: ${track?.name || path.basename(filePath)}`);
+  } catch {
+    await fs.promises.unlink(tempPath).catch(() => {});
+    event?.sender.send('download:log', '[AVISO] Não consegui gravar os metadados dessa faixa.');
+  }
+}
+
+function runProcess(command, args) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(command, args, {
+      shell: false,
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUTF8: '1'
+      }
+    });
+
+    let stderr = '';
+    proc.stderr.on('data', (chunk) => {
+      stderr += decodeBuffer(chunk);
+    });
+
+    proc.on('error', reject);
+    proc.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(stderr || `Processo finalizou com código ${code}.`));
+    });
+  });
 }
 
 function detectPlaylist(url, ytDlpBin) {

@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld('soundforge', {
   startDownload: (payload) => ipcRenderer.send('download:start', payload),
   onLog: (cb) => ipcRenderer.on('download:log', (_, data) => cb(data)),
   onProgress: (cb) => ipcRenderer.on('download:progress', (_, data) => cb(data)),
+  onTrackComplete: (cb) => ipcRenderer.on('download:track-complete', (_, data) => cb(data)),
+  onTrackSkipped: (cb) => ipcRenderer.on('download:track-skipped', (_, data) => cb(data)),
   onComplete: (cb) => ipcRenderer.on('download:complete', (_, data) => cb(data)),
   onError: (cb) => ipcRenderer.on('download:error', (_, data) => cb(data))
 });

@@ -14,6 +14,126 @@ const SOURCE_OPTIONS = [
   { label: 'Spotify', value: 'spotify' }
 ];
 
+const TECHNICAL_LOG_PATTERNS = [
+  /^\[debug\]/i,
+  /^debug:/i,
+  /^warning:/i,
+  /^error:/i,
+  /^\[youtube\].*api json/i,
+  /^\[youtube\].*downloading.*player/i,
+  /^\[info\]\s+available formats/i,
+  /^\[download\]\s+destination:/i,
+  /^\[download\]\s+\d{1,3}(?:\.\d+)?%/i,
+  /^\[download\]\s+got error/i,
+  /^\[download\]\s+retrying/i
+];
+
+const decodeLine = (line) => {
+  if (!line || typeof line !== 'string') return line;
+  try {
+    return decodeURIComponent(line);
+  } catch {
+    return line;
+  }
+};
+
+const stripLogPrefix = (line) => line.replace(/^\[(?:INFO|download|youtube|ExtractAudio)\]\s*/i, '').trim();
+
+const filenameFromPath = (value) => {
+  const filename = value.split(/[\\/]/).pop() || value;
+  return filename.replace(/\.[^/.]+$/, '').trim();
+};
+
+const formatReportLine = (line) => {
+  const cleaned = decodeLine(String(line || '').trim());
+  if (!cleaned) return [];
+
+  return cleaned
+    .split(/\r?\n/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      if (TECHNICAL_LOG_PATTERNS.some((pattern) => pattern.test(part))) return null;
+
+      const spotifyMatch = part.match(/^\[INFO\]\s+Buscando faixas da playlist no Spotify/i);
+      if (spotifyMatch) return 'Lendo a playlist do Spotify.';
+
+      const youtubeSearchMatch = part.match(/^\[INFO\]\s+Buscando no YouTube:\s*(.+)$/i);
+      if (youtubeSearchMatch) return `Buscando na forja: ${youtubeSearchMatch[1]}`;
+
+      const huntMatch = part.match(/^\[INFO\]\s+Caçando em (.+?):\s*(.+)$/i);
+      if (huntMatch) return `Caçando em ${huntMatch[1]}: ${huntMatch[2]}`;
+
+      const sourceMatch = part.match(/^\[INFO\]\s+Fonte encontrada:\s*(.+?)\.$/i);
+      if (sourceMatch) return `Fonte encontrada: ${sourceMatch[1]}.`;
+
+      if (/^\[INFO\]\s+.+? não entregou essa faixa/i.test(part)) {
+        return 'Essa fonte não entregou a faixa. Procurando outra.';
+      }
+
+      const metadataMatch = part.match(/^\[INFO\]\s+Metadados gravados:\s*(.+)$/i);
+      if (metadataMatch) return `Metadados gravados: ${metadataMatch[1]}`;
+
+      if (/^\[AVISO\]\s+Não consegui gravar os metadados/i.test(part)) {
+        return 'Faixa baixada, mas os metadados não foram gravados.';
+      }
+
+      const skippedMatch = part.match(/^\[AVISO\]\s+Faixa pulada:\s*(.+?)\.\s*Motivo:\s*(.+)$/i);
+      if (skippedMatch) return `Faixa não encontrada: ${skippedMatch[1]} (${skippedMatch[2]})`;
+
+      const playlistKindMatch = part.match(/^\[INFO\]\s+(.+?) detectado\. Mantendo o link como playlist\./i);
+      if (playlistKindMatch) return `${playlistKindMatch[1]} detectado. Sequência preservada.`;
+
+      const countMatch = part.match(/^\[INFO\]\s+(\d+)\s+itens encontrados na lista\./i);
+      if (countMatch) return `${countMatch[1]} faixas encontradas na sequência.`;
+
+      if (/^\[INFO\]\s+Não foi possível contar os itens/i.test(part)) {
+        return 'Sequência detectada. Contagem será atualizada durante a forja.';
+      }
+
+      const toolMatch = part.match(/^\[INFO\]\s+Baixando yt-dlp\.\.\.\s*(\d+)%/i);
+      if (toolMatch) return `Preparando ferramentas: ${toolMatch[1]}%.`;
+
+      const itemMatch = part.match(/Downloading item (\d+) of (\d+)/i);
+      if (itemMatch) return `Forjando faixa ${itemMatch[1]} de ${itemMatch[2]}.`;
+
+      const extractMatch = part.match(/^\[ExtractAudio\]\s+Destination:\s*(.+)$/i);
+      if (extractMatch) return `Áudio finalizado: ${filenameFromPath(extractMatch[1])}.`;
+
+      const destinationMatch = part.match(/Destination:\s*(.+)$/i);
+      if (destinationMatch) return `Arquivo preparado: ${filenameFromPath(destinationMatch[1])}.`;
+
+      const finishedMatch = part.match(/Finished downloading playlist:\s*(.+)$/i);
+      if (finishedMatch) return `Sequência concluída: ${finishedMatch[1]}.`;
+
+      const normalized = stripLogPrefix(part);
+      return normalized || null;
+    })
+    .filter(Boolean);
+};
+
+const appendReportLines = (setLogs, entries) => {
+  if (!entries.length) return;
+  setLogs((prev) => {
+    const next = [...prev];
+    entries.forEach((entry) => {
+      if (next[next.length - 1] !== entry) next.push(entry);
+    });
+    return next.slice(-40);
+  });
+};
+
+const upsertTrack = (items, track) => {
+  if (!track) return items;
+  const next = items.filter((item) => item.index !== track.index);
+  next.push(track);
+  return next.sort((a, b) => Number(a.index || 0) - Number(b.index || 0));
+};
+
+const formatTrackArtists = (track) => (
+  Array.isArray(track?.artists) && track.artists.length ? track.artists.join(', ') : ''
+);
+
 export default function App() {
   const [url, setUrl] = useState('');
   const [outputDir, setOutputDir] = useState('');
@@ -26,6 +146,8 @@ export default function App() {
   const [previewError, setPreviewError] = useState('');
   const [isDownloading, setIsDownloading] = useState(false);
   const [logs, setLogs] = useState([]);
+  const [downloadedTracks, setDownloadedTracks] = useState([]);
+  const [skippedTracks, setSkippedTracks] = useState([]);
   const [status, setStatus] = useState('Aguardando um link.');
   const [progress, setProgress] = useState({
     percent: 0,
@@ -54,38 +176,46 @@ export default function App() {
   const playlistLabel =
     progress.itemIndex && progress.itemCount ? `Faixa ${progress.itemIndex} de ${progress.itemCount}` : null;
   const forgeStateLabel = isDownloading ? 'Forja ativa' : 'Forja em repouso';
-  const decodeLine = (line) => {
-    if (!line || typeof line !== 'string') return line;
-    try {
-      return decodeURIComponent(line);
-    } catch {
-      return line;
-    }
-  };
-
   useEffect(() => {
     if (!window.soundforge) return;
 
     window.soundforge.onLog((line) => {
-      const cleaned = decodeLine(line.trim());
-      setLogs((prev) => [...prev, cleaned].filter(Boolean).slice(-200));
+      appendReportLines(setLogs, formatReportLine(line));
     });
 
     window.soundforge.onProgress((data) => {
       setProgress(data);
     });
 
-    window.soundforge.onComplete(({ isPlaylist }) => {
-      const completeMessage = isPlaylist ? 'Download da playlist concluído.' : 'Download concluído.';
+    window.soundforge.onTrackComplete((track) => {
+      setDownloadedTracks((prev) => upsertTrack(prev, track));
+    });
+
+    window.soundforge.onTrackSkipped((track) => {
+      setSkippedTracks((prev) => upsertTrack(prev, track));
+    });
+
+    window.soundforge.onComplete(({ isPlaylist, downloadedTracks = [], skippedTracks = [] }) => {
+      const completed = Array.isArray(downloadedTracks) ? downloadedTracks : [];
+      const skipped = Array.isArray(skippedTracks) ? skippedTracks : [];
+      const skippedCount = skipped.length;
+      const completeMessage = isPlaylist
+        ? skippedCount
+          ? `Download da playlist concluído com ${skippedCount} faixa(s) não baixada(s).`
+          : 'Download da playlist concluído.'
+        : 'Download concluído.';
       setIsDownloading(false);
-      setStatus(isPlaylist ? 'Playlist forjada com sucesso.' : 'Música forjada com sucesso.');
+      setStatus(skippedCount ? 'Playlist forjada com pendências.' : isPlaylist ? 'Playlist forjada com sucesso.' : 'Música forjada com sucesso.');
       setLogs([completeMessage]);
+      setDownloadedTracks(completed);
+      setSkippedTracks(skipped);
       setProgress((prev) => ({ ...prev, percent: 100 }));
     });
 
     window.soundforge.onError((message) => {
       setIsDownloading(false);
       setStatus(message || 'Falha no download.');
+      appendReportLines(setLogs, [`Falha na forja: ${message || 'download interrompido.'}`]);
     });
   }, []);
 
@@ -118,6 +248,8 @@ export default function App() {
     if (!window.soundforge || !isReady || isDownloading) return;
 
     setLogs([]);
+    setDownloadedTracks([]);
+    setSkippedTracks([]);
     setStatus('Invocando a forja...');
     setIsDownloading(true);
     setProgress({
@@ -314,39 +446,97 @@ export default function App() {
         </div>
       </section>
 
-      <div className="progress-logs-grid">
-        <section className="panel progress-card">
-          <div className="progress-header">
-            <h2>Progresso da forja</h2>
-            <span className="progress-pill">{playlistLabel || 'Faixa única'}</span>
-          </div>
-          <p className="progress-track">{trackLabel}</p>
-          <div className="progress-bar" role="progressbar" aria-valuenow={progressPercent} aria-valuemin={0} aria-valuemax={100}>
-            <div className="progress-fill" style={{ width: `${progressPercent}%` }} />
-          </div>
-          <div className="progress-meta">
-            <span>{progressLabel}</span>
-            <span>{progress.speed ? `Velocidade ${progress.speed}` : 'Velocidade --'}</span>
-            <span>{progress.eta ? `ETA ${progress.eta}` : 'ETA --'}</span>
-          </div>
-        </section>
+      <div className="forge-dashboard">
+        <div className="forge-column">
+          <section className="panel progress-card">
+            <div className="progress-header">
+              <h2>Progresso da forja</h2>
+              <span className="progress-pill">{playlistLabel || 'Faixa única'}</span>
+            </div>
+            <p className="progress-track">{trackLabel}</p>
+            <div className="progress-bar" role="progressbar" aria-valuenow={progressPercent} aria-valuemin={0} aria-valuemax={100}>
+              <div className="progress-fill" style={{ width: `${progressPercent}%` }} />
+            </div>
+            <div className="progress-meta">
+              <span>{progressLabel}</span>
+              <span>{progress.speed ? `Velocidade ${progress.speed}` : 'Velocidade --'}</span>
+              <span>{progress.eta ? `ETA ${progress.eta}` : 'ETA --'}</span>
+            </div>
+          </section>
 
-        <section className="panel logs">
-          <div className="logs-header">
-            <h2>Relatório da forja</h2>
-          </div>
-          <div className="log-box" ref={logBoxRef}>
-            {logs.length === 0 ? (
-              <p className="log-empty">Nenhuma mensagem ainda.</p>
-            ) : (
-              logs.map((line, index) => (
-                <div key={`${line}-${index}`} className="log-line">
-                  {line}
-                </div>
-              ))
-            )}
-          </div>
-        </section>
+          <section className="panel logs">
+            <div className="logs-header">
+              <h2>Relatório da forja</h2>
+            </div>
+            <div className="log-box" ref={logBoxRef}>
+              {logs.length === 0 ? (
+                <p className="log-empty">Nenhuma mensagem ainda.</p>
+              ) : (
+                logs.map((line, index) => (
+                  <div key={`${line}-${index}`} className="log-line">
+                    {line}
+                  </div>
+                ))
+              )}
+            </div>
+          </section>
+        </div>
+
+        <div className="forge-column">
+          <section className="panel track-results">
+            <div className="logs-header">
+              <h2>Músicas baixadas</h2>
+              <span className="progress-pill">{downloadedTracks.length}</span>
+            </div>
+            <div className="track-list success-list">
+              {downloadedTracks.length === 0 ? (
+                <p className="log-empty">Nenhuma música baixada ainda.</p>
+              ) : (
+                downloadedTracks.map((track) => {
+                  const artists = formatTrackArtists(track);
+                  return (
+                    <div key={`downloaded-${track.index}-${track.name}`} className="track-result success">
+                      <span className="track-result-index">{String(track.index).padStart(2, '0')}</span>
+                      <span className="track-result-main">
+                        <span className="track-result-title">{track.name}</span>
+                        <span className="track-result-meta">
+                          {artists ? `${artists} • ${track.source || 'Fonte encontrada'}` : track.source || 'Fonte encontrada'}
+                        </span>
+                      </span>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </section>
+
+          <section className="panel track-results">
+            <div className="logs-header">
+              <h2>Músicas não baixadas</h2>
+              <span className="progress-pill">{skippedTracks.length}</span>
+            </div>
+            <div className="track-list missing-list">
+              {skippedTracks.length === 0 ? (
+                <p className="log-empty">Nenhuma pendência registrada.</p>
+              ) : (
+                skippedTracks.map((track) => {
+                  const artists = formatTrackArtists(track);
+                  return (
+                    <div key={`skipped-${track.index}-${track.name}`} className="track-result missing">
+                      <span className="track-result-index">{String(track.index).padStart(2, '0')}</span>
+                      <span className="track-result-main">
+                        <span className="track-result-title">{track.name}</span>
+                        <span className="track-result-meta">
+                          {artists ? `${artists} • ${track.reason}` : track.reason}
+                        </span>
+                      </span>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </section>
+        </div>
       </div>
     </div>
   );
