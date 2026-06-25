@@ -560,6 +560,14 @@ body::before {
   color: var(--ink);
 }
 
+.button.update {
+  padding: 12px 18px;
+  border: 1px solid rgba(108, 199, 122, 0.42);
+  background: linear-gradient(135deg, rgba(108, 199, 122, 0.2), rgba(212, 169, 76, 0.18));
+  color: var(--ink);
+  box-shadow: 0 10px 22px rgba(108, 199, 122, 0.16);
+}
+
 .button:hover:not(:disabled) {
   transform: translateY(-1px);
   box-shadow: 0 12px 24px rgba(0, 0, 0, 0.24);

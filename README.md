@@ -73,7 +73,7 @@ O GitHub Actions executa `.github/workflows/release.yml`, gera o instalador Wind
 
 ## Auto-update
 
-O auto-update roda apenas na versao instalada/empacotada, nunca no `npm run dev`. Quando o app instalado abre, ele consulta o GitHub Releases do repositorio publico `CaioAbra/Soundforge`. Se existir uma versao mais nova publicada com metadados de update, ela e baixada em segundo plano e instalada quando o Soundforge for fechado.
+O auto-update roda apenas na versao instalada/empacotada, nunca no `npm run dev`. Quando o app instalado abre, ele consulta o GitHub Releases do repositorio publico `CaioAbra/Soundforge`. Se existir uma versao mais nova publicada com metadados de update, ela e baixada em segundo plano. Quando o download termina, o app mostra um botao para reiniciar e instalar a atualizacao.
 
 Notas importantes:
 

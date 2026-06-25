@@ -148,6 +148,7 @@ export default function App() {
   const [logs, setLogs] = useState([]);
   const [downloadedTracks, setDownloadedTracks] = useState([]);
   const [skippedTracks, setSkippedTracks] = useState([]);
+  const [readyUpdate, setReadyUpdate] = useState(null);
   const [status, setStatus] = useState('Aguardando um link.');
   const [progress, setProgress] = useState({
     percent: 0,
@@ -224,6 +225,11 @@ export default function App() {
       setStatus(message || 'Falha no download.');
       appendReportLines(setLogs, [`Falha na forja: ${message || 'download interrompido.'}`]);
     });
+
+    window.soundforge.onUpdateDownloaded?.((info) => {
+      setReadyUpdate(info || {});
+      setStatus(`Atualização ${info?.version || ''} pronta para instalar.`.trim());
+    });
   }, []);
 
   useEffect(() => {
@@ -276,6 +282,11 @@ export default function App() {
       outputDir: outputDir.trim(),
       quality
     });
+  };
+
+  const handleRestartAndInstall = () => {
+    if (!window.soundforge?.restartAndInstallUpdate) return;
+    window.soundforge.restartAndInstallUpdate();
   };
 
   const handleSpotifyPreview = async () => {
@@ -450,6 +461,11 @@ export default function App() {
             <span className={`status-dot ${isDownloading ? 'busy' : ''}`}></span>
             <span>{status}</span>
           </div>
+          {readyUpdate && (
+            <button className="button update" type="button" onClick={handleRestartAndInstall}>
+              Reiniciar e instalar
+            </button>
+          )}
         </div>
       </section>
 

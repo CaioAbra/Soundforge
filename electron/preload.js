@@ -9,5 +9,7 @@ contextBridge.exposeInMainWorld('soundforge', {
   onTrackComplete: (cb) => ipcRenderer.on('download:track-complete', (_, data) => cb(data)),
   onTrackSkipped: (cb) => ipcRenderer.on('download:track-skipped', (_, data) => cb(data)),
   onComplete: (cb) => ipcRenderer.on('download:complete', (_, data) => cb(data)),
-  onError: (cb) => ipcRenderer.on('download:error', (_, data) => cb(data))
+  onError: (cb) => ipcRenderer.on('download:error', (_, data) => cb(data)),
+  onUpdateDownloaded: (cb) => ipcRenderer.on('update:downloaded', (_, data) => cb(data)),
+  restartAndInstallUpdate: () => ipcRenderer.invoke('update:restart-and-install')
 });

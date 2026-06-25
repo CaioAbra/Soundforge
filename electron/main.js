@@ -79,6 +79,8 @@ function setupAutoUpdater(win) {
 
   autoUpdater.on('update-downloaded', (info) => {
     sendUpdateLog(`[INFO] Atualização ${info.version} pronta. Ela será instalada ao fechar o Soundforge.`);
+    if (!win || win.isDestroyed()) return;
+    win.webContents.send('update:downloaded', { version: info.version });
   });
 
   autoUpdater.on('error', (err) => {
@@ -91,6 +93,12 @@ function setupAutoUpdater(win) {
     });
   });
 }
+
+ipcMain.handle('update:restart-and-install', () => {
+  if (isDev) return false;
+  autoUpdater.quitAndInstall(false, true);
+  return true;
+});
 
 ipcMain.handle('select-output-dir', async () => {
   const result = await dialog.showOpenDialog({
