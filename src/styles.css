@@ -611,6 +611,8 @@ body::before {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: var(--panel-gap);
   align-items: stretch;
+  height: clamp(620px, 72vh, 780px);
+  min-height: 0;
 }
 
 .forge-column {
@@ -618,14 +620,17 @@ body::before {
   grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
   gap: var(--panel-gap);
   min-width: 0;
+  min-height: 0;
 }
 
 .forge-column:first-child {
-  grid-template-rows: minmax(190px, 0.72fr) minmax(310px, 1.28fr);
+  grid-template-rows: minmax(170px, 0.62fr) minmax(0, 1.38fr);
 }
 
 .forge-column > .panel {
+  height: 100%;
   min-width: 0;
+  min-height: 0;
 }
 
 .progress-header {
@@ -723,7 +728,7 @@ body::before {
   border-radius: 12px;
   padding: 14px 16px 18px;
   flex: 1;
-  min-height: 150px;
+  min-height: 0;
   max-height: none;
   overflow-y: auto;
   border: 1px solid rgba(232, 181, 90, 0.18);
@@ -768,7 +773,7 @@ body::before {
   border-radius: 12px;
   padding: 10px 12px 18px;
   flex: 1;
-  min-height: 150px;
+  min-height: 0;
   max-height: none;
   overflow-y: auto;
   border: 1px solid rgba(232, 181, 90, 0.16);
@@ -848,6 +853,7 @@ body::before {
 
   .forge-dashboard {
     grid-template-columns: 1fr;
+    height: auto;
   }
 
   .forge-column {
