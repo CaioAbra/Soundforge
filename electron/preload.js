@@ -2,6 +2,9 @@
 
 contextBridge.exposeInMainWorld('soundforge', {
   selectOutputDir: () => ipcRenderer.invoke('select-output-dir'),
+  getSettings: () => ipcRenderer.invoke('settings:get'),
+  saveSpotifyToken: (token) => ipcRenderer.invoke('settings:save-spotify-token', token),
+  clearSpotifyToken: () => ipcRenderer.invoke('settings:clear-spotify-token'),
   getSpotifyPreview: (payload) => ipcRenderer.invoke('spotify:preview', payload),
   startDownload: (payload) => ipcRenderer.send('download:start', payload),
   onLog: (cb) => ipcRenderer.on('download:log', (_, data) => cb(data)),

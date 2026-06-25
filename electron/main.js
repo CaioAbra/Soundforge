@@ -100,6 +100,29 @@ ipcMain.handle('update:restart-and-install', () => {
   return true;
 });
 
+ipcMain.handle('settings:get', async () => {
+  const settings = await readUserSettings();
+  return {
+    ...settings,
+    appVersion: app.getVersion()
+  };
+});
+
+ipcMain.handle('settings:save-spotify-token', async (_event, token) => {
+  const spotifyToken = normalizeSpotifyToken(token);
+  const settings = await readUserSettings();
+  const nextSettings = { ...settings, spotifyToken };
+  await writeUserSettings(nextSettings);
+  return { saved: true, hasSpotifyToken: Boolean(spotifyToken) };
+});
+
+ipcMain.handle('settings:clear-spotify-token', async () => {
+  const settings = await readUserSettings();
+  const nextSettings = { ...settings, spotifyToken: '' };
+  await writeUserSettings(nextSettings);
+  return { saved: true, hasSpotifyToken: false };
+});
+
 ipcMain.handle('select-output-dir', async () => {
   const result = await dialog.showOpenDialog({
     properties: ['openDirectory', 'createDirectory']
@@ -246,6 +269,7 @@ ipcMain.on('download:start', async (event, payload) => {
           playlistName,
           trackNumber: index + 1,
           trackTotal: spotifyTracks.length,
+          coverUrl: track.coverUrl,
           event
         });
 
@@ -276,7 +300,8 @@ ipcMain.on('download:start', async (event, payload) => {
       quality,
       ffmpegLocation,
       input: finalUrl,
-      yesPlaylist: isPlaylist
+      yesPlaylist: isPlaylist,
+      singleTrackNumber: isPlaylist ? null : 1
     });
 
     const code = await runYtDlp(ytDlpBin, args, event, sendProgress);
@@ -314,6 +339,28 @@ function getUserYtDlpDir() {
 
 function getUserYtDlpBinaryPath() {
   return path.join(getUserYtDlpDir(), 'yt-dlp.exe');
+}
+
+function getUserSettingsPath() {
+  return path.join(app.getPath('userData'), 'soundforge-settings.json');
+}
+
+async function readUserSettings() {
+  try {
+    const raw = await fs.promises.readFile(getUserSettingsPath(), 'utf8');
+    const parsed = JSON.parse(raw);
+    return {
+      spotifyToken: typeof parsed.spotifyToken === 'string' ? parsed.spotifyToken : ''
+    };
+  } catch {
+    return { spotifyToken: '' };
+  }
+}
+
+async function writeUserSettings(settings) {
+  const settingsPath = getUserSettingsPath();
+  await fs.promises.mkdir(path.dirname(settingsPath), { recursive: true });
+  await fs.promises.writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
 }
 
 async function ensureYtDlpBinary(event) {
@@ -442,12 +489,22 @@ function decodeBuffer(buffer) {
   return latin1Text || utf8Text;
 }
 
-function buildYtDlpArgs({ outputTemplate, quality, ffmpegLocation, input, noPlaylist = false, yesPlaylist = false }) {
+function buildYtDlpArgs({
+  outputTemplate,
+  quality,
+  ffmpegLocation,
+  input,
+  noPlaylist = false,
+  yesPlaylist = false,
+  singleTrackNumber = null
+}) {
   const args = [
     '--extract-audio',
     '--audio-format', 'mp3',
     '--audio-quality', String(quality || '5'),
     '--embed-metadata',
+    '--embed-thumbnail',
+    '--convert-thumbnails', 'jpg',
     '--no-mtime',
     '--newline',
     '--output', outputTemplate
@@ -463,6 +520,10 @@ function buildYtDlpArgs({ outputTemplate, quality, ffmpegLocation, input, noPlay
 
   if (ffmpegLocation) {
     args.unshift('--ffmpeg-location', ffmpegLocation);
+  }
+
+  if (singleTrackNumber) {
+    args.push('--postprocessor-args', `Metadata+FFmpeg_o:-metadata track=${singleTrackNumber}`);
   }
 
   args.push(input);
@@ -512,13 +573,13 @@ function runYtDlp(ytDlpBin, args, event, sendProgress) {
 
     const handleOutput = (chunk) => {
       const text = decodeBuffer(chunk);
-      event.sender.send('download:log', text);
-
-      text
+      const parsedLines = text
         .split(/\r?\n/)
         .map((line) => line.trim())
-        .filter(Boolean)
-        .forEach((line) => {
+        .filter(Boolean);
+      let liveDownloadLine = null;
+
+      parsedLines.forEach((line) => {
           const itemMatch = line.match(/Downloading item (\d+) of (\d+)/i);
           if (itemMatch) {
             sendProgress({
@@ -546,7 +607,24 @@ function runYtDlp(ytDlpBin, args, event, sendProgress) {
               eta: speedMatch[2]
             });
           }
+
+          if (percentMatch) {
+            const details = speedMatch ? ` • ${speedMatch[1]} • ETA ${speedMatch[2]}` : '';
+            liveDownloadLine = `[PROGRESS] Download em andamento: ${percentMatch[1]}%${details}`;
+          }
         });
+
+      const visibleLines = parsedLines.filter((line) => {
+        const isDownloadProgress = /^\[download\]\s+\d{1,3}(?:\.\d+)?%/i.test(line);
+        return !isDownloadProgress;
+      });
+
+      if (visibleLines.length) {
+        event.sender.send('download:log', visibleLines.join('\n'));
+      }
+      if (liveDownloadLine) {
+        event.sender.send('download:log', liveDownloadLine);
+      }
     };
 
     proc.stdout.on('data', handleOutput);
@@ -697,7 +775,7 @@ async function fetchSpotifyPlaylistFromApi(token, playlistId, maxTracks = null) 
 
   while (true) {
     const data = await fetchSpotifyApi(
-      `/v1/playlists/${playlistId}/tracks?limit=${limit}&offset=${offset}&fields=items(track(name,artists(name))),total`,
+      `/v1/playlists/${playlistId}/tracks?limit=${limit}&offset=${offset}&fields=items(track(name,artists(name),album(name,images(url,width,height)))),total`,
       token,
       { playlistId }
     );
@@ -709,7 +787,9 @@ async function fetchSpotifyPlaylistFromApi(token, playlistId, maxTracks = null) 
       const artists = Array.isArray(item.track.artists)
         ? item.track.artists.map((artist) => artist.name).filter(Boolean)
         : [];
-      if (name) tracks.push({ name, artists });
+      const coverUrl = selectSpotifyImageUrl(item.track.album?.images);
+      const albumName = item.track.album?.name || '';
+      if (name) tracks.push({ name, artists, albumName, coverUrl });
     });
 
     if (maxTracks && tracks.length >= maxTracks) {
@@ -743,7 +823,8 @@ async function fetchSpotifyEmbedPlaylist(playlistId, maxTracks = null) {
   const tracks = trackList
     .map((track) => ({
       name: track?.title || '',
-      artists: track?.subtitle ? [track.subtitle] : []
+      artists: track?.subtitle ? [track.subtitle] : [],
+      coverUrl: selectSpotifyEmbedImageUrl(track)
     }))
     .filter((track) => track.name);
 
@@ -877,6 +958,30 @@ function buildSpotifyQuery(track) {
   return `${track.name} ${artists}`.trim();
 }
 
+function selectSpotifyImageUrl(images) {
+  if (!Array.isArray(images) || images.length === 0) return '';
+  const sorted = images
+    .filter((image) => image?.url)
+    .sort((a, b) => Number(b.width || 0) - Number(a.width || 0));
+  return sorted[0]?.url || '';
+}
+
+function selectSpotifyEmbedImageUrl(track) {
+  const candidates = [
+    track?.coverArt?.sources,
+    track?.albumOfTrack?.coverArt?.sources,
+    track?.album?.coverArt?.sources,
+    track?.images
+  ];
+
+  for (const candidate of candidates) {
+    const imageUrl = selectSpotifyImageUrl(candidate);
+    if (imageUrl) return imageUrl;
+  }
+
+  return track?.image || track?.thumbnail || '';
+}
+
 function buildSpotifyOutputBase(track, indexPrefix) {
   const artists = Array.isArray(track?.artists) ? track.artists.join(', ') : '';
   const title = sanitizeFileComponent(track?.name || 'Faixa');
@@ -899,34 +1004,95 @@ function resolveFfmpegBinary(ffmpegLocation) {
   return null;
 }
 
-async function writeMp3Metadata({ ffmpegLocation, filePath, track, playlistName, trackNumber, trackTotal, event }) {
+async function writeMp3Metadata({ ffmpegLocation, filePath, track, playlistName, trackNumber, trackTotal, coverUrl, event }) {
   const ffmpegBin = resolveFfmpegBinary(ffmpegLocation);
   if (!ffmpegBin || !filePath || !fs.existsSync(filePath)) return;
 
   const artists = Array.isArray(track?.artists) ? track.artists.filter(Boolean).join(', ') : '';
   const tempPath = `${filePath}.metadata.tmp.mp3`;
+  const coverPath = coverUrl ? `${filePath}.cover.tmp.jpg` : '';
+  let useCover = false;
+
+  if (coverUrl && coverPath) {
+    try {
+      await downloadCoverFile(coverUrl, coverPath);
+      useCover = true;
+    } catch {
+      await fs.promises.unlink(coverPath).catch(() => {});
+      event?.sender.send('download:log', '[AVISO] Não consegui baixar a capa dessa faixa.');
+    }
+  }
+
   const args = [
     '-y',
-    '-i', filePath,
-    '-map', '0',
-    '-codec', 'copy',
-    '-id3v2_version', '3',
+    '-i', filePath
+  ];
+
+  if (useCover) {
+    args.push(
+      '-i', coverPath,
+      '-map', '0:a',
+      '-map', '1:v',
+      '-codec', 'copy',
+      '-id3v2_version', '3',
+      '-metadata:s:v', 'title=Album cover',
+      '-metadata:s:v', 'comment=Cover (front)',
+      '-disposition:v:0', 'attached_pic'
+    );
+  } else {
+    args.push(
+      '-map', '0',
+      '-codec', 'copy',
+      '-id3v2_version', '3'
+    );
+  }
+
+  args.push(
     '-metadata', `title=${track?.name || ''}`,
     '-metadata', `artist=${artists}`,
-    '-metadata', `album=${playlistName || 'Spotify Playlist'}`,
+    '-metadata', `album=${track?.albumName || playlistName || 'Spotify Playlist'}`,
     '-metadata', `track=${trackNumber}/${trackTotal}`,
     tempPath
-  ];
+  );
 
   try {
     await runProcess(ffmpegBin, args);
     await fs.promises.copyFile(tempPath, filePath);
     await fs.promises.unlink(tempPath).catch(() => {});
+    await fs.promises.unlink(coverPath).catch(() => {});
     event?.sender.send('download:log', `[INFO] Metadados gravados: ${track?.name || path.basename(filePath)}`);
   } catch {
     await fs.promises.unlink(tempPath).catch(() => {});
+    await fs.promises.unlink(coverPath).catch(() => {});
     event?.sender.send('download:log', '[AVISO] Não consegui gravar os metadados dessa faixa.');
   }
+}
+
+function downloadCoverFile(url, destinationPath) {
+  return new Promise((resolve, reject) => {
+    const request = https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0 Soundforge' } }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        downloadCoverFile(res.headers.location, destinationPath).then(resolve, reject);
+        return;
+      }
+
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error(`Download retornou HTTP ${res.statusCode}.`));
+        return;
+      }
+
+      const file = fs.createWriteStream(destinationPath);
+      res.pipe(file);
+      file.on('finish', () => {
+        file.close(resolve);
+      });
+      file.on('error', reject);
+    });
+
+    request.on('error', reject);
+  });
 }
 
 function runProcess(command, args) {

@@ -1,12 +1,12 @@
 ﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { GiAnvil, GiThorHammer } from 'react-icons/gi';
+import { FiSettings, FiX } from 'react-icons/fi';
 
 const QUALITY_OPTIONS = [
-  { label: '0 (Melhor)', value: '0' },
-  { label: '2 (Alta)', value: '2' },
-  { label: '5 (Média)', value: '5' },
-  { label: '7 (Boa para voz)', value: '7' },
-  { label: '9 (Menor)', value: '9' }
+  { label: 'Melhor qualidade', detail: 'MP3 mais fiel', value: '0' },
+  { label: 'Alta', detail: 'Ótimo equilíbrio', value: '2' },
+  { label: 'Média', detail: 'Uso geral', value: '5' },
+  { label: 'Boa para voz', detail: 'Podcasts e falas', value: '7' },
+  { label: 'Menor arquivo', detail: 'Ocupa menos espaço', value: '9' }
 ];
 
 const SOURCE_OPTIONS = [
@@ -44,6 +44,9 @@ const filenameFromPath = (value) => {
   return filename.replace(/\.[^/.]+$/, '').trim();
 };
 
+const liveLog = (text, key) => ({ text, key });
+const getLogText = (entry) => (typeof entry === 'string' ? entry : entry?.text || '');
+
 const formatReportLine = (line) => {
   const cleaned = decodeLine(String(line || '').trim());
   if (!cleaned) return [];
@@ -53,6 +56,9 @@ const formatReportLine = (line) => {
     .map((part) => part.trim())
     .filter(Boolean)
     .map((part) => {
+      const liveProgressMatch = part.match(/^\[PROGRESS\]\s+(.+)$/i);
+      if (liveProgressMatch) return liveLog(liveProgressMatch[1], 'download-progress');
+
       if (TECHNICAL_LOG_PATTERNS.some((pattern) => pattern.test(part))) return null;
 
       const spotifyMatch = part.match(/^\[INFO\]\s+Buscando faixas da playlist no Spotify/i);
@@ -92,7 +98,7 @@ const formatReportLine = (line) => {
       }
 
       const toolMatch = part.match(/^\[INFO\]\s+Baixando yt-dlp\.\.\.\s*(\d+)%/i);
-      if (toolMatch) return `Preparando ferramentas: ${toolMatch[1]}%.`;
+      if (toolMatch) return liveLog(`Preparando ferramentas: ${toolMatch[1]}%.`, 'tool-download');
 
       const itemMatch = part.match(/Downloading item (\d+) of (\d+)/i);
       if (itemMatch) return `Forjando faixa ${itemMatch[1]} de ${itemMatch[2]}.`;
@@ -117,7 +123,14 @@ const appendReportLines = (setLogs, entries) => {
   setLogs((prev) => {
     const next = [...prev];
     entries.forEach((entry) => {
-      if (next[next.length - 1] !== entry) next.push(entry);
+      if (entry?.key) {
+        const existingIndex = next.findIndex((item) => item?.key === entry.key);
+        if (existingIndex !== -1) next.splice(existingIndex, 1);
+        next.push(entry);
+        return;
+      }
+
+      if (getLogText(next[next.length - 1]) !== entry) next.push(entry);
     });
     return next.slice(-40);
   });
@@ -140,6 +153,10 @@ export default function App() {
   const [quality, setQuality] = useState('5');
   const [source, setSource] = useState('youtube');
   const [spotifyToken, setSpotifyToken] = useState('');
+  const [tokenSaveState, setTokenSaveState] = useState('');
+  const [hasSavedSpotifyToken, setHasSavedSpotifyToken] = useState(false);
+  const [appVersion, setAppVersion] = useState('');
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [spotifyPlaylistUrl, setSpotifyPlaylistUrl] = useState('');
   const [spotifyPreview, setSpotifyPreview] = useState(null);
   const [isPreviewing, setIsPreviewing] = useState(false);
@@ -176,9 +193,21 @@ export default function App() {
   const trackLabel = progress.title || (isDownloading ? 'Invocando faixa...' : 'Nenhuma faixa em execução');
   const playlistLabel =
     progress.itemIndex && progress.itemCount ? `Faixa ${progress.itemIndex} de ${progress.itemCount}` : null;
-  const forgeStateLabel = isDownloading ? 'Forja ativa' : 'Forja em repouso';
+  const hasSpotifyToken = hasSavedSpotifyToken || spotifyToken.trim().length > 0;
+  const showSpotifyTokenWarning = source === 'spotify' && !hasSpotifyToken;
+  const showSubtleSpotifyNotice = source !== 'spotify' && !hasSavedSpotifyToken;
+  const hasDashboardContent = isDownloading || logs.length > 0 || downloadedTracks.length > 0 || skippedTracks.length > 0;
   useEffect(() => {
     if (!window.soundforge) return;
+
+    window.soundforge.getSettings?.().then((settings) => {
+      if (settings?.appVersion) setAppVersion(settings.appVersion);
+      if (settings?.spotifyToken) {
+        setSpotifyToken(settings.spotifyToken);
+        setHasSavedSpotifyToken(true);
+        setTokenSaveState('Token carregado deste computador.');
+      }
+    }).catch(() => {});
 
     window.soundforge.onLog((line) => {
       appendReportLines(setLogs, formatReportLine(line));
@@ -211,7 +240,7 @@ export default function App() {
       setDownloadedTracks(completed);
       setSkippedTracks(skipped);
       setProgress({
-        percent: 100,
+        percent: 0,
         speed: '',
         eta: '',
         title: completeMessage,
@@ -289,6 +318,31 @@ export default function App() {
     window.soundforge.restartAndInstallUpdate();
   };
 
+  const handleSaveSpotifyToken = async () => {
+    if (!window.soundforge?.saveSpotifyToken || !spotifyToken.trim()) return;
+    setTokenSaveState('Salvando token...');
+    try {
+      await window.soundforge.saveSpotifyToken(spotifyToken.trim());
+      setHasSavedSpotifyToken(true);
+      setTokenSaveState('Token salvo neste computador.');
+    } catch {
+      setTokenSaveState('Não consegui salvar o token.');
+    }
+  };
+
+  const handleClearSpotifyToken = async () => {
+    if (!window.soundforge?.clearSpotifyToken) return;
+    setTokenSaveState('Removendo token...');
+    try {
+      await window.soundforge.clearSpotifyToken();
+      setSpotifyToken('');
+      setHasSavedSpotifyToken(false);
+      setTokenSaveState('Token removido deste computador.');
+    } catch {
+      setTokenSaveState('Não consegui remover o token.');
+    }
+  };
+
   const handleSpotifyPreview = async () => {
     if (!window.soundforge || isPreviewing || isDownloading) return;
     if (!spotifyToken.trim() || !spotifyPlaylistUrl.trim()) return;
@@ -310,25 +364,18 @@ export default function App() {
 
   return (
     <div className={`app ${isCompact ? 'compact' : ''}`}>
-      <header className="hero">
-        <div className="hero-copy">
-          <p className="eyebrow">Forja Sonora</p>
-          <h1>Soundforge</h1>
-          <p className="subtitle">Baixe canções do reino do YouTube com qualidade à sua escolha.</p>
+      <nav className="topbar" aria-label="Navegação principal">
+        <div className="topbar-brand">
+          <span className="topbar-eyebrow">Forja Sonora</span>
+          <span className="topbar-title">Soundforge</span>
+          <span className="topbar-subtitle">Baixe canções do reino do YouTube com qualidade à sua escolha.</span>
         </div>
-        <div className={`crest anvil-crest ${isDownloading ? 'forging' : ''}`} aria-hidden="true">
-          <div className="forge-stage">
-            <GiAnvil className="forge-anvil" />
-            <GiThorHammer className="forge-hammer" />
-            <span className="spark spark-a">✦</span>
-            <span className="spark spark-b">✦</span>
-            <span className="spark spark-c">✦</span>
-          </div>
-          <span className="crest-state">{forgeStateLabel}</span>
-        </div>
-      </header>
+        <button className="icon-button" type="button" onClick={() => setIsSettingsOpen(true)} aria-label="Abrir configurações">
+          <FiSettings />
+        </button>
+      </nav>
 
-      <section className="panel">
+      <section className="panel control-panel">
         <div className="source-block">
           <label className="label">Fonte</label>
           <div className="select-row">
@@ -345,37 +392,53 @@ export default function App() {
               </label>
             ))}
           </div>
+          {showSpotifyTokenWarning && (
+            <p className="source-notice warning">Spotify indisponível: nenhum token configurado.</p>
+          )}
+          {showSubtleSpotifyNotice && (
+            <p className="source-notice subtle">Spotify sem token salvo neste computador.</p>
+          )}
         </div>
 
-        {source === 'youtube' ? (
-        <label className="label link-label">Link do YouTube</label>
-        ) : (
-        <label className="label link-label">Link da playlist do Spotify</label>
-        )}
-        <input
-          className="input"
-          placeholder={source === 'youtube' ? 'Cole aqui o link da música ou playlist' : 'Cole aqui o link da playlist do Spotify'}
-          value={source === 'youtube' ? url : spotifyPlaylistUrl}
-          onChange={(event) => {
-            if (source === 'youtube') setUrl(event.target.value);
-            else setSpotifyPlaylistUrl(event.target.value);
-          }}
-        />
+        <div className="control-field control-field-wide">
+          {source === 'youtube' ? (
+            <label className="label link-label">Link do YouTube</label>
+          ) : (
+            <label className="label link-label">Link da playlist do Spotify</label>
+          )}
+          <input
+            className="input"
+            placeholder={source === 'youtube' ? 'Cole aqui o link da música ou playlist' : 'Cole aqui o link da playlist do Spotify'}
+            value={source === 'youtube' ? url : spotifyPlaylistUrl}
+            onChange={(event) => {
+              if (source === 'youtube') setUrl(event.target.value);
+              else setSpotifyPlaylistUrl(event.target.value);
+            }}
+          />
+        </div>
 
         {source === 'spotify' && (
-          <>
+          <div className="control-field control-field-wide spotify-token-block">
             <label className="label token-label">Token do Spotify</label>
             <input
               className="input"
               type="password"
               placeholder="Cole aqui seu token Bearer"
               value={spotifyToken}
-              onChange={(event) => setSpotifyToken(event.target.value)}
+              onChange={(event) => {
+                setSpotifyToken(event.target.value);
+                setTokenSaveState('');
+              }}
             />
-            <p className="helper">
-              O token é temporário. Não compartilhe nem versione em repositório.
-            </p>
             <div className="preview-row">
+              <button
+                className="button ghost"
+                type="button"
+                onClick={handleSaveSpotifyToken}
+                disabled={!spotifyToken.trim() || isDownloading}
+              >
+                Salvar token
+              </button>
               <button
                 className="button ghost"
                 type="button"
@@ -384,6 +447,7 @@ export default function App() {
               >
                 {isPreviewing ? 'Carregando prévia...' : 'Ver prévia da playlist'}
               </button>
+              {tokenSaveState && <span className="helper success">{tokenSaveState}</span>}
               {previewError && <span className="helper error">{previewError}</span>}
             </div>
             {spotifyPreview && (
@@ -410,15 +474,16 @@ export default function App() {
                 )}
               </div>
             )}
-          </>
+          </div>
         )}
 
-        <div className="grid">
-          <div>
+        <div className="grid control-grid">
+          <div className="quality-block">
             <label className="label">Qualidade do MP3</label>
+            <p className="field-hint">Afeta o equilíbrio entre fidelidade, tamanho do arquivo e tempo de processamento.</p>
             <div className="select-row">
               {QUALITY_OPTIONS.map((option) => (
-                <label key={option.value} className={`radio ${quality === option.value ? 'active' : ''}`}>
+                <label key={option.value} className={`radio quality-option ${quality === option.value ? 'active' : ''}`}>
                   <input
                     type="radio"
                     name="quality"
@@ -426,12 +491,15 @@ export default function App() {
                     checked={quality === option.value}
                     onChange={() => setQuality(option.value)}
                   />
-                  <span>{option.label}</span>
+                  <span className="quality-copy">
+                    <span className="quality-label">{option.label}</span>
+                    <span className="quality-detail">{option.detail}</span>
+                  </span>
                 </label>
               ))}
             </div>
           </div>
-          <div>
+          <div className="destination-block">
             <label className="label">Pasta de destino</label>
             <div className="folder-row">
               <button className="button ghost" type="button" onClick={handleSelectFolder}>
@@ -442,14 +510,16 @@ export default function App() {
           </div>
         </div>
 
-        <div className="actions">
+        <div className="actions control-actions">
           <button
             className="button primary"
             type="button"
             onClick={handleDownload}
             disabled={!isReady || isDownloading || isPreviewing}
           >
-            <span className="button-icon">{isDownloading ? '*' : 'v'}</span>
+            <span className={`button-icon ${isDownloading ? 'loading' : ''}`} aria-hidden="true">
+              {isDownloading ? '' : '↓'}
+            </span>
             <span className="button-content">
               <span className="button-title">{isDownloading ? 'Forjando...' : 'Iniciar download'}</span>
               <span className="button-subtitle">
@@ -469,7 +539,7 @@ export default function App() {
         </div>
       </section>
 
-      <div className="forge-dashboard">
+      <div className={`forge-dashboard ${hasDashboardContent ? 'has-content' : 'is-empty'}`}>
         <div className="forge-column">
           <section className="panel progress-card">
             <div className="progress-header">
@@ -496,8 +566,8 @@ export default function App() {
                 <p className="log-empty">Nenhuma mensagem ainda.</p>
               ) : (
                 logs.map((line, index) => (
-                  <div key={`${line}-${index}`} className="log-line">
-                    {line}
+                  <div key={`${getLogText(line)}-${index}`} className="log-line">
+                    {getLogText(line)}
                   </div>
                 ))
               )}
@@ -561,6 +631,76 @@ export default function App() {
           </section>
         </div>
       </div>
+
+      <footer className="app-footer">
+        <span>{hasSavedSpotifyToken ? 'Token Spotify salvo' : 'Token Spotify não salvo'}</span>
+      </footer>
+
+      {isSettingsOpen && (
+        <div className="settings-overlay" role="presentation" onClick={() => setIsSettingsOpen(false)}>
+          <aside
+            className="settings-drawer"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="settings-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="settings-header">
+              <div>
+                <p className="eyebrow">Preferências</p>
+                <h2 id="settings-title">Configurações</h2>
+              </div>
+              <button className="icon-button" type="button" onClick={() => setIsSettingsOpen(false)} aria-label="Fechar configurações">
+                <FiX />
+              </button>
+            </div>
+
+            <div className="settings-section">
+              <span className="settings-label">Versão do app</span>
+              <strong>{appVersion ? `v${appVersion}` : 'Versão local'}</strong>
+            </div>
+
+            <div className="settings-section">
+              <span className="settings-label">Spotify</span>
+              <strong>{hasSavedSpotifyToken ? 'Token salvo neste computador' : 'Nenhum token salvo'}</strong>
+              <div className="settings-actions">
+                <button
+                  className="button ghost"
+                  type="button"
+                  onClick={handleSaveSpotifyToken}
+                  disabled={!spotifyToken.trim() || isDownloading}
+                >
+                  Salvar token atual
+                </button>
+                <button
+                  className="button danger"
+                  type="button"
+                  onClick={handleClearSpotifyToken}
+                  disabled={!hasSavedSpotifyToken || isDownloading}
+                >
+                  Limpar token
+                </button>
+              </div>
+              {tokenSaveState && <p className="helper success">{tokenSaveState}</p>}
+            </div>
+
+            <div className="settings-section">
+              <span className="settings-label">Atualizações</span>
+              <strong>{readyUpdate ? `Atualização ${readyUpdate.version || ''} pronta` : 'Auto-update ativo na versão instalada'}</strong>
+              {readyUpdate && (
+                <button className="button update drawer-update" type="button" onClick={handleRestartAndInstall}>
+                  Reiniciar e instalar
+                </button>
+              )}
+            </div>
+
+            <footer className="settings-footer">
+              <span>Soundforge</span>
+              <strong>{appVersion ? `v${appVersion}` : 'versão local'}</strong>
+            </footer>
+          </aside>
+        </div>
+      )}
     </div>
   );
 }
