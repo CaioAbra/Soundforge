@@ -44,6 +44,41 @@ npm run electron
 
 `npm run electron` abre a versao gerada em `dist/` depois do build.
 
+## Instalador e Releases
+
+Este projeto usa `electron-builder` para gerar instalador Windows e `electron-updater` para buscar atualizacoes publicadas no GitHub Releases.
+
+Para gerar um instalador local sem publicar:
+
+```powershell
+npm run dist
+```
+
+Os artefatos locais ficam em `release/`, que nao deve ser versionado.
+
+Para publicar uma nova versao:
+
+1. Atualize o campo `version` em `package.json`.
+2. Crie uma tag no formato `vX.Y.Z`, por exemplo `v0.1.1`.
+3. Envie a tag para o GitHub.
+
+```powershell
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+O GitHub Actions executa `.github/workflows/release.yml`, gera o instalador Windows e publica os arquivos no GitHub Releases. O `GITHUB_TOKEN` padrao do Actions e usado automaticamente pelo workflow.
+
+## Auto-update
+
+O auto-update roda apenas na versao instalada/empacotada, nunca no `npm run dev`. Quando o app instalado abre, ele consulta o GitHub Releases do repositorio publico `CaioAbra/Soundforge`. Se existir uma versao mais nova publicada com metadados de update, ela e baixada em segundo plano e instalada quando o Soundforge for fechado.
+
+Notas importantes:
+
+- No Windows, o instalador funciona sem certificado, mas o SmartScreen pode exibir aviso enquanto o app nao tiver reputacao/assinatura.
+- O auto-update so funciona depois que o usuario instalou uma versao gerada por release, porque builds de desenvolvimento nao consultam updates.
+- Para macOS, seria necessario configurar assinatura/notarizacao antes de distribuir com auto-update.
+
 ## Como Usar
 
 1. Escolha a fonte: YouTube ou Spotify.
@@ -62,23 +97,6 @@ O token do Spotify e temporario e deve ter permissao para ler a playlist informa
 Algumas playlists do Spotify podem retornar HTTP 404 pela Web API mesmo abrindo normalmente no navegador. Nesses casos, o app tenta usar a previa publica do embed do Spotify como fallback para ler nome da playlist e faixas.
 
 Faixas nao encontradas sao puladas, e o app continua a playlist. Ao final, a area "Musicas nao baixadas" lista as pendencias e o motivo.
-
-## Estado da Distribuicao
-
-Este checkout ainda roda como app de desenvolvimento Electron + Vite. Ele nao esta configurado como instalador publicado no GitHub, e ainda nao possui auto-update para usuarios finais.
-
-E possivel evoluir para um app instalavel com atualizacao automatica via GitHub Releases. Para isso, o projeto precisaria adicionar empacotamento Electron, gerar instaladores, publicar releases com metadados de update e integrar um atualizador no processo principal do Electron.
-
-Um caminho provavel:
-
-1. Adicionar uma ferramenta de empacotamento, como `electron-builder` ou Electron Forge.
-2. Configurar nome do app, app id, icone, arquivos incluidos e alvo Windows, por exemplo NSIS.
-3. Configurar publicacao para GitHub Releases.
-4. Integrar `electron-updater` ou `autoUpdater` no processo principal.
-5. Assinar builds quando necessario, especialmente para uma experiencia melhor no Windows e obrigatoriamente para auto-update no macOS.
-6. Criar um fluxo de release, idealmente via GitHub Actions, para gerar instaladores e publicar os artefatos.
-
-Nada disso esta executado neste repositorio ainda.
 
 ## Observacoes
 

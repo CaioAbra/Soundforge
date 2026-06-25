@@ -1,16 +1,25 @@
 {
   "name": "soundforge",
   "version": "0.1.0",
-  "private": true,
+  "description": "Electron + React desktop app for forging MP3 downloads from YouTube and Spotify playlists.",
+  "private": false,
   "main": "electron/main.js",
   "type": "commonjs",
+  "author": "CaioAbra",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CaioAbra/Soundforge.git"
+  },
   "scripts": {
     "dev": "concurrently \"vite\" \"wait-on tcp:5173 && node scripts/run-electron.js .\"",
     "build": "vite build",
+    "dist": "npm run build && electron-builder --win --publish never",
+    "release": "npm run build && electron-builder --win --publish always",
     "preview": "vite preview",
     "electron": "node scripts/run-electron.js ."
   },
   "dependencies": {
+    "electron-updater": "^6.8.9",
     "iconv-lite": "^0.6.3",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
@@ -20,7 +29,55 @@
     "@vitejs/plugin-react": "^4.2.1",
     "concurrently": "^8.2.2",
     "electron": "^28.2.1",
+    "electron-builder": "^26.15.3",
     "vite": "^5.1.0",
     "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.caioabra.soundforge",
+    "productName": "Soundforge",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/ffmpeg/ffmpeg.exe",
+        "to": "ffmpeg/ffmpeg.exe"
+      },
+      {
+        "from": "resources/ffmpeg/ffprobe.exe",
+        "to": "ffmpeg/ffprobe.exe"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "CaioAbra",
+        "repo": "Soundforge"
+      }
+    ]
   }
 }

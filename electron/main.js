@@ -4,6 +4,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const https = require('https');
 const iconv = require('iconv-lite');
+const { autoUpdater } = require('electron-updater');
 
 const isDev = !app.isPackaged;
 const SPOTIFY_TRACK_SOURCES = [
@@ -35,11 +36,14 @@ function createWindow() {
   }
 
   win.setMenuBarVisibility(false);
+  return win;
 }
 
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
-  createWindow();
+  app.setAppUserModelId('com.caioabra.soundforge');
+  const win = createWindow();
+  setupAutoUpdater(win);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -49,6 +53,44 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
+
+function setupAutoUpdater(win) {
+  if (isDev) return;
+
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  const sendUpdateLog = (message) => {
+    if (!win || win.isDestroyed()) return;
+    win.webContents.send('download:log', message);
+  };
+
+  autoUpdater.on('checking-for-update', () => {
+    sendUpdateLog('[INFO] Procurando atualização do Soundforge...');
+  });
+
+  autoUpdater.on('update-available', (info) => {
+    sendUpdateLog(`[INFO] Atualização ${info.version} encontrada. Baixando em segundo plano...`);
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    sendUpdateLog('[INFO] Soundforge já está atualizado.');
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    sendUpdateLog(`[INFO] Atualização ${info.version} pronta. Ela será instalada ao fechar o Soundforge.`);
+  });
+
+  autoUpdater.on('error', (err) => {
+    sendUpdateLog(`[AVISO] Não foi possível verificar atualização: ${err?.message || 'erro desconhecido'}.`);
+  });
+
+  win.webContents.once('did-finish-load', () => {
+    autoUpdater.checkForUpdatesAndNotify().catch((err) => {
+      sendUpdateLog(`[AVISO] Não foi possível iniciar o auto-update: ${err?.message || 'erro desconhecido'}.`);
+    });
+  });
+}
 
 ipcMain.handle('select-output-dir', async () => {
   const result = await dialog.showOpenDialog({
