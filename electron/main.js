@@ -13,6 +13,49 @@ const SPOTIFY_TRACK_SOURCES = [
   { label: 'Google Video', inputPrefix: 'gvsearch1' },
   { label: 'Yahoo Video', inputPrefix: 'yvsearch1' }
 ];
+const downloadPause = {
+  active: false,
+  pauseRequested: false,
+  paused: false,
+  resume: null,
+  sender: null
+};
+
+function sendPauseState(state) {
+  if (!downloadPause.sender || downloadPause.sender.isDestroyed()) return;
+  downloadPause.sender.send('download:pause-state', { state });
+}
+
+function resetPauseState(sender = null) {
+  if (downloadPause.resume) {
+    downloadPause.resume();
+  }
+  downloadPause.active = Boolean(sender);
+  downloadPause.pauseRequested = false;
+  downloadPause.paused = false;
+  downloadPause.resume = null;
+  downloadPause.sender = sender;
+  if (sender && !sender.isDestroyed()) {
+    sender.send('download:pause-state', { state: 'running' });
+  }
+}
+
+async function waitIfPaused(event) {
+  if (!downloadPause.pauseRequested) return;
+
+  downloadPause.paused = true;
+  event.sender.send('download:pause-state', { state: 'paused' });
+  event.sender.send('download:log', '[INFO] Download pausado. Clique em continuar para retomar.');
+
+  await new Promise((resolve) => {
+    downloadPause.resume = resolve;
+  });
+
+  downloadPause.resume = null;
+  downloadPause.paused = false;
+  event.sender.send('download:pause-state', { state: 'running' });
+  event.sender.send('download:log', '[INFO] Retomando a forja.');
+}
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -131,6 +174,28 @@ ipcMain.handle('select-output-dir', async () => {
   return result.filePaths[0];
 });
 
+ipcMain.handle('download:pause', () => {
+  if (!downloadPause.active) return { ok: false, state: 'idle' };
+  downloadPause.pauseRequested = true;
+  if (downloadPause.paused) {
+    sendPauseState('paused');
+    return { ok: true, state: 'paused' };
+  }
+  sendPauseState('pausing');
+  downloadPause.sender?.send('download:log', '[INFO] Pausa solicitada. Vou terminar a faixa atual antes de parar.');
+  return { ok: true, state: 'pausing' };
+});
+
+ipcMain.handle('download:resume', () => {
+  if (!downloadPause.active) return { ok: false, state: 'idle' };
+  downloadPause.pauseRequested = false;
+  if (downloadPause.resume) {
+    downloadPause.resume();
+  }
+  sendPauseState('running');
+  return { ok: true, state: 'running' };
+});
+
 ipcMain.handle('spotify:preview', async (_event, payload) => {
   const { spotifyToken, spotifyPlaylistUrl } = payload || {};
   if (!spotifyToken || !spotifyPlaylistUrl) {
@@ -148,6 +213,7 @@ ipcMain.handle('spotify:preview', async (_event, payload) => {
 
 ipcMain.on('download:start', async (event, payload) => {
   try {
+    resetPauseState(event.sender);
     const {
       source = 'youtube',
       url,
@@ -160,10 +226,12 @@ ipcMain.on('download:start', async (event, payload) => {
     if (source === 'spotify') {
       if (!spotifyToken || !spotifyPlaylistUrl || !outputDir) {
         event.sender.send('download:error', 'Token e link da playlist do Spotify são obrigatórios.');
+        resetPauseState(null);
         return;
       }
     } else if (!url || !outputDir) {
       event.sender.send('download:error', 'URL e pasta de destino são obrigatórias.');
+      resetPauseState(null);
       return;
     }
 
@@ -175,6 +243,7 @@ ipcMain.on('download:start', async (event, payload) => {
         'download:error',
         'Não foi possível preparar o yt-dlp automaticamente. Verifique sua conexão ou configure YTDLP_BIN.'
       );
+      resetPauseState(null);
       return;
     }
 
@@ -204,6 +273,7 @@ ipcMain.on('download:start', async (event, payload) => {
       const playlistId = extractSpotifyPlaylistId(spotifyPlaylistUrl);
       if (!playlistId) {
         event.sender.send('download:error', 'Não foi possível identificar o ID da playlist do Spotify.');
+        resetPauseState(null);
         return;
       }
 
@@ -214,6 +284,7 @@ ipcMain.on('download:start', async (event, payload) => {
 
       if (spotifyTracks.length === 0) {
         event.sender.send('download:error', 'Não encontrei faixas na playlist.');
+        resetPauseState(null);
         return;
       }
 
@@ -225,6 +296,8 @@ ipcMain.on('download:start', async (event, payload) => {
       const skippedTracks = [];
 
       for (let index = 0; index < spotifyTracks.length; index += 1) {
+        await waitIfPaused(event);
+
         const track = spotifyTracks[index];
         const query = buildSpotifyQuery(track);
         sendProgress({
@@ -286,6 +359,7 @@ ipcMain.on('download:start', async (event, payload) => {
 
       sendProgress({ percent: 100 });
       event.sender.send('download:complete', { isPlaylist: true, downloadedTracks, skippedTracks });
+      resetPauseState(null);
       return;
     }
 
@@ -294,6 +368,43 @@ ipcMain.on('download:start', async (event, payload) => {
     const outputTemplate = isPlaylist
       ? path.join(outputDir, '%(playlist_title)s', '%(title)s.%(ext)s')
       : path.join(outputDir, '%(title)s.%(ext)s');
+
+    if (isPlaylist && youtubePlaylistInfo.itemCount) {
+      for (let index = 1; index <= youtubePlaylistInfo.itemCount; index += 1) {
+        await waitIfPaused(event);
+        sendProgress({
+          itemIndex: index,
+          itemCount: youtubePlaylistInfo.itemCount,
+          percent: 0,
+          speed: '',
+          eta: ''
+        });
+
+        const args = buildYtDlpArgs({
+          outputTemplate,
+          quality,
+          ffmpegLocation,
+          input: finalUrl,
+          yesPlaylist: true,
+          playlistItems: index
+        });
+
+        const code = await runYtDlp(ytDlpBin, args, event, sendProgress, {
+          itemIndex: index,
+          itemCount: youtubePlaylistInfo.itemCount
+        });
+
+        if (code !== 0) {
+          event.sender.send('download:log', `[AVISO] Item ${index} não foi baixado. Seguindo para o próximo.`);
+          continue;
+        }
+      }
+
+      sendProgress({ percent: 100 });
+      event.sender.send('download:complete', { isPlaylist });
+      resetPauseState(null);
+      return;
+    }
 
     const args = buildYtDlpArgs({
       outputTemplate,
@@ -308,11 +419,14 @@ ipcMain.on('download:start', async (event, payload) => {
     if (code === 0) {
       sendProgress({ percent: 100 });
       event.sender.send('download:complete', { isPlaylist });
+      resetPauseState(null);
     } else {
       event.sender.send('download:error', `Falha no download. Código ${code}.`);
+      resetPauseState(null);
     }
   } catch (err) {
     event.sender.send('download:error', err?.message || 'Erro inesperado.');
+    resetPauseState(null);
   }
 });
 
@@ -496,7 +610,8 @@ function buildYtDlpArgs({
   input,
   noPlaylist = false,
   yesPlaylist = false,
-  singleTrackNumber = null
+  singleTrackNumber = null,
+  playlistItems = null
 }) {
   const args = [
     '--extract-audio',
@@ -516,6 +631,10 @@ function buildYtDlpArgs({
 
   if (yesPlaylist) {
     args.push('--yes-playlist');
+  }
+
+  if (playlistItems) {
+    args.push('--playlist-items', String(playlistItems));
   }
 
   if (ffmpegLocation) {
@@ -560,7 +679,7 @@ async function downloadSpotifyTrack({ ytDlpBin, outputTemplate, quality, ffmpegL
   };
 }
 
-function runYtDlp(ytDlpBin, args, event, sendProgress) {
+function runYtDlp(ytDlpBin, args, event, sendProgress, options = {}) {
   return new Promise((resolve) => {
     const proc = spawn(ytDlpBin, args, {
       shell: false,
@@ -583,8 +702,8 @@ function runYtDlp(ytDlpBin, args, event, sendProgress) {
           const itemMatch = line.match(/Downloading item (\d+) of (\d+)/i);
           if (itemMatch) {
             sendProgress({
-              itemIndex: Number(itemMatch[1]),
-              itemCount: Number(itemMatch[2])
+              itemIndex: options.itemIndex || Number(itemMatch[1]),
+              itemCount: options.itemCount || Number(itemMatch[2])
             });
           }
 

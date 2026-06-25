@@ -73,6 +73,18 @@ const formatReportLine = (line) => {
       const sourceMatch = part.match(/^\[INFO\]\s+Fonte encontrada:\s*(.+?)\.$/i);
       if (sourceMatch) return `Fonte encontrada: ${sourceMatch[1]}.`;
 
+      if (/^\[INFO\]\s+Pausa solicitada/i.test(part)) {
+        return 'Pausa solicitada. A faixa atual será finalizada primeiro.';
+      }
+
+      if (/^\[INFO\]\s+Download pausado/i.test(part)) {
+        return 'Download pausado. Pronto para continuar.';
+      }
+
+      if (/^\[INFO\]\s+Retomando a forja/i.test(part)) {
+        return 'Continuando de onde parou.';
+      }
+
       if (/^\[INFO\]\s+.+? não entregou essa faixa/i.test(part)) {
         return 'Essa fonte não entregou a faixa. Procurando outra.';
       }
@@ -86,6 +98,9 @@ const formatReportLine = (line) => {
 
       const skippedMatch = part.match(/^\[AVISO\]\s+Faixa pulada:\s*(.+?)\.\s*Motivo:\s*(.+)$/i);
       if (skippedMatch) return `Faixa não encontrada: ${skippedMatch[1]} (${skippedMatch[2]})`;
+
+      const youtubeSkippedMatch = part.match(/^\[AVISO\]\s+Item\s+(\d+)\s+não foi baixado/i);
+      if (youtubeSkippedMatch) return `Faixa ${youtubeSkippedMatch[1]} não foi baixada. Seguindo a sequência.`;
 
       const playlistKindMatch = part.match(/^\[INFO\]\s+(.+?) detectado\. Mantendo o link como playlist\./i);
       if (playlistKindMatch) return `${playlistKindMatch[1]} detectado. Sequência preservada.`;
@@ -102,6 +117,18 @@ const formatReportLine = (line) => {
 
       const itemMatch = part.match(/Downloading item (\d+) of (\d+)/i);
       if (itemMatch) return `Forjando faixa ${itemMatch[1]} de ${itemMatch[2]}.`;
+
+      if (/Writing video thumbnail/i.test(part)) {
+        return liveLog('Preparando capa da faixa.', 'thumbnail');
+      }
+
+      if (/^\[ThumbnailsConvertor\]\s+Converting thumbnail/i.test(part)) {
+        return liveLog('Convertendo capa para o MP3.', 'thumbnail');
+      }
+
+      if (/Deleting original file/i.test(part)) {
+        return liveLog('Limpando arquivos temporários.', 'cleanup');
+      }
 
       const extractMatch = part.match(/^\[ExtractAudio\]\s+Destination:\s*(.+)$/i);
       if (extractMatch) return `Áudio finalizado: ${filenameFromPath(extractMatch[1])}.`;
@@ -162,6 +189,7 @@ export default function App() {
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState('');
   const [isDownloading, setIsDownloading] = useState(false);
+  const [pauseState, setPauseState] = useState('idle');
   const [logs, setLogs] = useState([]);
   const [downloadedTracks, setDownloadedTracks] = useState([]);
   const [skippedTracks, setSkippedTracks] = useState([]);
@@ -197,6 +225,8 @@ export default function App() {
   const showSpotifyTokenWarning = source === 'spotify' && !hasSpotifyToken;
   const showSubtleSpotifyNotice = source !== 'spotify' && !hasSavedSpotifyToken;
   const hasDashboardContent = isDownloading || logs.length > 0 || downloadedTracks.length > 0 || skippedTracks.length > 0;
+  const pauseButtonLabel = pauseState === 'paused' ? 'Continuar' : pauseState === 'pausing' ? 'Pausando...' : 'Pausar';
+  const pauseButtonHint = pauseState === 'paused' ? 'Retomar de onde parou' : 'Para após a faixa atual';
   useEffect(() => {
     if (!window.soundforge) return;
 
@@ -217,6 +247,13 @@ export default function App() {
       setProgress(data);
     });
 
+    window.soundforge.onPauseState?.(({ state }) => {
+      setPauseState(state || 'idle');
+      if (state === 'pausing') setStatus('Pausando após a faixa atual.');
+      if (state === 'paused') setStatus('Download pausado.');
+      if (state === 'running') setStatus('Forja em andamento.');
+    });
+
     window.soundforge.onTrackComplete((track) => {
       setDownloadedTracks((prev) => upsertTrack(prev, track));
     });
@@ -235,6 +272,7 @@ export default function App() {
           : 'Download da playlist concluído.'
         : 'Download concluído.';
       setIsDownloading(false);
+      setPauseState('idle');
       setStatus(skippedCount ? 'Playlist forjada com pendências.' : isPlaylist ? 'Playlist forjada com sucesso.' : 'Música forjada com sucesso.');
       setLogs([completeMessage]);
       setDownloadedTracks(completed);
@@ -251,6 +289,7 @@ export default function App() {
 
     window.soundforge.onError((message) => {
       setIsDownloading(false);
+      setPauseState('idle');
       setStatus(message || 'Falha no download.');
       appendReportLines(setLogs, [`Falha na forja: ${message || 'download interrompido.'}`]);
     });
@@ -294,6 +333,7 @@ export default function App() {
     setSkippedTracks([]);
     setStatus('Invocando a forja...');
     setIsDownloading(true);
+    setPauseState('running');
     setProgress({
       percent: 0,
       speed: '',
@@ -316,6 +356,18 @@ export default function App() {
   const handleRestartAndInstall = () => {
     if (!window.soundforge?.restartAndInstallUpdate) return;
     window.soundforge.restartAndInstallUpdate();
+  };
+
+  const handlePauseToggle = async () => {
+    if (!window.soundforge || !isDownloading) return;
+    if (pauseState === 'paused') {
+      setPauseState('running');
+      await window.soundforge.resumeDownload?.();
+      return;
+    }
+
+    setPauseState('pausing');
+    await window.soundforge.pauseDownload?.();
   };
 
   const handleSaveSpotifyToken = async () => {
@@ -418,27 +470,33 @@ export default function App() {
         </div>
 
         {source === 'spotify' && (
-          <div className="control-field control-field-wide spotify-token-block">
-            <label className="label token-label">Token do Spotify</label>
-            <input
-              className="input"
-              type="password"
-              placeholder="Cole aqui seu token Bearer"
-              value={spotifyToken}
-              onChange={(event) => {
-                setSpotifyToken(event.target.value);
-                setTokenSaveState('');
-              }}
-            />
+          <>
+            {!hasSavedSpotifyToken && (
+              <div className="control-field control-field-wide spotify-token-block">
+                <label className="label token-label">Token do Spotify</label>
+                <input
+                  className="input"
+                  type="password"
+                  placeholder="Cole aqui seu token Bearer"
+                  value={spotifyToken}
+                  onChange={(event) => {
+                    setSpotifyToken(event.target.value);
+                    setTokenSaveState('');
+                  }}
+                />
+              </div>
+            )}
             <div className="preview-row">
-              <button
-                className="button ghost"
-                type="button"
-                onClick={handleSaveSpotifyToken}
-                disabled={!spotifyToken.trim() || isDownloading}
-              >
-                Salvar token
-              </button>
+              {!hasSavedSpotifyToken && (
+                <button
+                  className="button ghost"
+                  type="button"
+                  onClick={handleSaveSpotifyToken}
+                  disabled={!spotifyToken.trim() || isDownloading}
+                >
+                  Salvar token
+                </button>
+              )}
               <button
                 className="button ghost"
                 type="button"
@@ -447,7 +505,7 @@ export default function App() {
               >
                 {isPreviewing ? 'Carregando prévia...' : 'Ver prévia da playlist'}
               </button>
-              {tokenSaveState && <span className="helper success">{tokenSaveState}</span>}
+              {!hasSavedSpotifyToken && tokenSaveState && <span className="helper success">{tokenSaveState}</span>}
               {previewError && <span className="helper error">{previewError}</span>}
             </div>
             {spotifyPreview && (
@@ -474,7 +532,7 @@ export default function App() {
                 )}
               </div>
             )}
-          </div>
+          </>
         )}
 
         <div className="grid control-grid">
@@ -527,6 +585,17 @@ export default function App() {
               </span>
             </span>
           </button>
+          {isDownloading && (
+            <button
+              className={`button pause ${pauseState === 'paused' ? 'paused' : ''}`}
+              type="button"
+              onClick={handlePauseToggle}
+              disabled={pauseState === 'pausing'}
+            >
+              <span className="button-title">{pauseButtonLabel}</span>
+              <span className="button-subtitle">{pauseButtonHint}</span>
+            </button>
+          )}
           <div className="status">
             <span className={`status-dot ${isDownloading ? 'busy' : ''}`}></span>
             <span>{status}</span>
@@ -663,6 +732,17 @@ export default function App() {
             <div className="settings-section">
               <span className="settings-label">Spotify</span>
               <strong>{hasSavedSpotifyToken ? 'Token salvo neste computador' : 'Nenhum token salvo'}</strong>
+              <label className="label settings-token-label">Editar token</label>
+              <input
+                className="input"
+                type="password"
+                placeholder="Cole aqui seu token Bearer"
+                value={spotifyToken}
+                onChange={(event) => {
+                  setSpotifyToken(event.target.value);
+                  setTokenSaveState('');
+                }}
+              />
               <div className="settings-actions">
                 <button
                   className="button ghost"
