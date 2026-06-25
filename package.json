@@ -1,6 +1,6 @@
 {
   "name": "soundforge",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Electron + React desktop app for forging MP3 downloads from YouTube and Spotify playlists.",
   "private": false,
   "main": "electron/main.js",
@@ -69,8 +69,14 @@
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
+      "shortcutName": "Soundforge",
+      "menuCategory": "Soundforge",
+      "uninstallDisplayName": "Soundforge",
+      "uninstallUrlInfoAbout": "https://github.com/CaioAbra/Soundforge",
+      "uninstallUrlReadme": "https://github.com/CaioAbra/Soundforge#readme",
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "createStartMenuShortcut": true,
+      "runAfterFinish": true
     },
     "publish": [
       {

@@ -209,7 +209,14 @@ export default function App() {
       setLogs([completeMessage]);
       setDownloadedTracks(completed);
       setSkippedTracks(skipped);
-      setProgress((prev) => ({ ...prev, percent: 100 }));
+      setProgress({
+        percent: 100,
+        speed: '',
+        eta: '',
+        title: completeMessage,
+        itemIndex: null,
+        itemCount: null
+      });
     });
 
     window.soundforge.onError((message) => {

@@ -56,6 +56,8 @@ npm run dist
 
 Os artefatos locais ficam em `release/`, que nao deve ser versionado.
 
+O instalador cria atalho no Desktop, pasta "Soundforge" no Menu Iniciar e entrada oficial em "Aplicativos instalados" / "Programas e Recursos" do Windows. A desinstalacao deve ser feita por essa entrada do Windows, exibida como "Soundforge".
+
 Para publicar uma nova versao:
 
 1. Atualize o campo `version` em `package.json`.
