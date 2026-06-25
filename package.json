@@ -1,6 +1,6 @@
 {
   "name": "soundforge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Electron + React desktop app for forging MP3 downloads from YouTube and Spotify playlists.",
   "private": false,
   "main": "electron/main.js",

@@ -26,7 +26,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build and publish release
-        run: npm run release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build installer
+        run: npm run dist
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/Soundforge-Setup-*.exe
+            release/Soundforge-Setup-*.exe.blockmap
+            release/latest.yml
+          fail_on_unmatched_files: true
+          generate_release_notes: true
