@@ -1,5 +1,6 @@
 ﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { FiSettings, FiX } from 'react-icons/fi';
+import logoSoundforge from './assets/logo_soundforge.png';
 
 const QUALITY_OPTIONS = [
   { label: 'Melhor qualidade', detail: 'MP3 mais fiel', value: '0' },
@@ -418,9 +419,12 @@ export default function App() {
     <div className={`app ${isCompact ? 'compact' : ''}`}>
       <nav className="topbar" aria-label="Navegação principal">
         <div className="topbar-brand">
-          <span className="topbar-eyebrow">Forja Sonora</span>
-          <span className="topbar-title">Soundforge</span>
-          <span className="topbar-subtitle">Baixe canções do reino do YouTube com qualidade à sua escolha.</span>
+          <img className="topbar-logo" src={logoSoundforge} alt="Soundforge" />
+          <span className="topbar-copy">
+            <span className="topbar-eyebrow">Forja Sonora</span>
+            <span className="topbar-title">Soundforge</span>
+            <span className="topbar-subtitle">Baixe canções do reino do YouTube com qualidade à sua escolha.</span>
+          </span>
         </div>
         <button className="icon-button" type="button" onClick={() => setIsSettingsOpen(true)} aria-label="Abrir configurações">
           <FiSettings />
@@ -764,19 +768,19 @@ export default function App() {
               {tokenSaveState && <p className="helper success">{tokenSaveState}</p>}
             </div>
 
-            <div className="settings-section">
-              <span className="settings-label">Atualizações</span>
-              <strong>{readyUpdate ? `Atualização ${readyUpdate.version || ''} pronta` : 'Auto-update ativo na versão instalada'}</strong>
+            <footer className="settings-footer">
+              <div className="settings-footer-copy">
+                <span>Soundforge</span>
+                <strong>{appVersion ? `v${appVersion}` : 'versão local'}</strong>
+                <span className="settings-update-note">
+                  {readyUpdate ? `Atualização ${readyUpdate.version || ''} pronta` : 'Auto-update ativo'}
+                </span>
+              </div>
               {readyUpdate && (
                 <button className="button update drawer-update" type="button" onClick={handleRestartAndInstall}>
                   Reiniciar e instalar
                 </button>
               )}
-            </div>
-
-            <footer className="settings-footer">
-              <span>Soundforge</span>
-              <strong>{appVersion ? `v${appVersion}` : 'versão local'}</strong>
             </footer>
           </aside>
         </div>

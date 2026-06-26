@@ -13,6 +13,17 @@ const SPOTIFY_TRACK_SOURCES = [
   { label: 'Google Video', inputPrefix: 'gvsearch1' },
   { label: 'Yahoo Video', inputPrefix: 'yvsearch1' }
 ];
+
+function resolveAppIconPath() {
+  const devIcon = path.join(app.getAppPath(), 'resources', 'logo_soundforge.png');
+  if (fs.existsSync(devIcon)) return devIcon;
+
+  const prodIcon = path.join(process.resourcesPath || '', 'logo_soundforge.png');
+  if (fs.existsSync(prodIcon)) return prodIcon;
+
+  return undefined;
+}
+
 const downloadPause = {
   active: false,
   pauseRequested: false,
@@ -58,6 +69,7 @@ async function waitIfPaused(event) {
 }
 
 function createWindow() {
+  const icon = resolveAppIconPath();
   const win = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -65,6 +77,7 @@ function createWindow() {
     minHeight: 640,
     backgroundColor: '#0f0b07',
     autoHideMenuBar: true,
+    ...(icon ? { icon } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

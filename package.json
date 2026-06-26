@@ -1,6 +1,6 @@
 {
   "name": "soundforge",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Electron + React desktop app for forging MP3 downloads from YouTube and Spotify playlists.",
   "private": false,
   "main": "electron/main.js",
@@ -52,9 +52,14 @@
       {
         "from": "resources/ffmpeg/ffprobe.exe",
         "to": "ffmpeg/ffprobe.exe"
+      },
+      {
+        "from": "resources/logo_soundforge.png",
+        "to": "logo_soundforge.png"
       }
     ],
     "win": {
+      "icon": "resources/logo_soundforge.ico",
       "target": [
         {
           "target": "nsis",
