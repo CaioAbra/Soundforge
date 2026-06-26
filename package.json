@@ -1,6 +1,6 @@
 {
   "name": "soundforge",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Electron + React desktop app for forging MP3 downloads from YouTube and Spotify playlists.",
   "private": false,
   "main": "electron/main.js",
@@ -9,6 +9,9 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/CaioAbra/Soundforge.git"
+  },
+  "soundforge": {
+    "spotifyClientId": ""
   },
   "scripts": {
     "dev": "concurrently \"vite\" \"wait-on tcp:5173 && node scripts/run-electron.js .\"",
@@ -70,6 +73,14 @@
       ],
       "artifactName": "${productName}-Setup-${version}.${ext}"
     },
+    "protocols": [
+      {
+        "name": "Soundforge Spotify Login",
+        "schemes": [
+          "soundforge"
+        ]
+      }
+    ],
     "nsis": {
       "oneClick": false,
       "perMachine": false,

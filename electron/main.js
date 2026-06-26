@@ -1,12 +1,17 @@
-﻿const { app, BrowserWindow, ipcMain, dialog, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, shell } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const https = require('https');
+const crypto = require('crypto');
 const iconv = require('iconv-lite');
 const { autoUpdater } = require('electron-updater');
 
 const isDev = !app.isPackaged;
+const APP_PROTOCOL = 'soundforge';
+const SPOTIFY_REDIRECT_URI = `${APP_PROTOCOL}://spotify/callback`;
+const SPOTIFY_SCOPES = ['playlist-read-private', 'playlist-read-collaborative'];
+const ENV_SPOTIFY_CLIENT_ID = process.env.SOUNDFORGE_SPOTIFY_CLIENT_ID || '';
 const SPOTIFY_TRACK_SOURCES = [
   { label: 'YouTube', inputPrefix: 'ytsearch1' },
   { label: 'SoundCloud', inputPrefix: 'scsearch1' },
@@ -31,6 +36,9 @@ const downloadPause = {
   resume: null,
   sender: null
 };
+
+let pendingSpotifyCallback = null;
+let mainWindow = null;
 
 function sendPauseState(state) {
   if (!downloadPause.sender || downloadPause.sender.isDestroyed()) return;
@@ -92,19 +100,79 @@ function createWindow() {
   }
 
   win.setMenuBarVisibility(false);
+  mainWindow = win;
   return win;
 }
 
-app.whenReady().then(() => {
-  Menu.setApplicationMenu(null);
-  app.setAppUserModelId('com.caioabra.soundforge');
-  const win = createWindow();
-  setupAutoUpdater(win);
+function registerAppProtocol() {
+  if (process.defaultApp) {
+    app.setAsDefaultProtocolClient(APP_PROTOCOL, process.execPath, [path.resolve(process.argv[1] || '.')]);
+    return;
+  }
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  app.setAsDefaultProtocolClient(APP_PROTOCOL);
+}
+
+function focusMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.focus();
+}
+
+function handleSpotifyProtocolFromArgv(argv = []) {
+  const callbackUrl = argv.find((arg) => typeof arg === 'string' && arg.startsWith(`${SPOTIFY_REDIRECT_URI}?`));
+  if (callbackUrl) handleSpotifyProtocolUrl(callbackUrl);
+}
+
+function handleSpotifyProtocolUrl(callbackUrl) {
+  if (!pendingSpotifyCallback) return false;
+
+  try {
+    const url = new URL(callbackUrl);
+    if (url.protocol !== `${APP_PROTOCOL}:` || url.hostname !== 'spotify' || url.pathname !== '/callback') {
+      return false;
+    }
+
+    const state = url.searchParams.get('state');
+    const code = url.searchParams.get('code');
+    const error = url.searchParams.get('error');
+    pendingSpotifyCallback.finish({ state, code, error });
+    return true;
+  } catch (err) {
+    pendingSpotifyCallback.finish({ error: err.message || 'callback inválido' });
+    return false;
+  }
+}
+
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (_event, argv) => {
+    handleSpotifyProtocolFromArgv(argv);
+    focusMainWindow();
   });
-});
+
+  app.on('open-url', (event, url) => {
+    event.preventDefault();
+    handleSpotifyProtocolUrl(url);
+    focusMainWindow();
+  });
+
+  app.whenReady().then(() => {
+    Menu.setApplicationMenu(null);
+    app.setAppUserModelId('com.caioabra.soundforge');
+    registerAppProtocol();
+    const win = createWindow();
+    setupAutoUpdater(win);
+    handleSpotifyProtocolFromArgv(process.argv);
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  });
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
@@ -159,7 +227,12 @@ ipcMain.handle('update:restart-and-install', () => {
 ipcMain.handle('settings:get', async () => {
   const settings = await readUserSettings();
   return {
-    ...settings,
+    spotifyToken: settings.spotifyToken,
+    spotifyClientId: settings.spotifyClientId,
+    hasDefaultSpotifyClientId: Boolean(getDefaultSpotifyClientId()),
+    hasSpotifyAuth: Boolean(settings.spotifyAuth?.refreshToken),
+    spotifyAuthExpiresAt: settings.spotifyAuth?.expiresAt || null,
+    spotifyRedirectUri: SPOTIFY_REDIRECT_URI,
     appVersion: app.getVersion()
   };
 });
@@ -172,11 +245,44 @@ ipcMain.handle('settings:save-spotify-token', async (_event, token) => {
   return { saved: true, hasSpotifyToken: Boolean(spotifyToken) };
 });
 
+ipcMain.handle('settings:save-spotify-client-id', async (_event, clientId) => {
+  const spotifyClientId = normalizeSpotifyClientId(clientId);
+  const settings = await readUserSettings();
+  const nextSettings = { ...settings, spotifyClientId };
+  await writeUserSettings(nextSettings);
+  return { saved: true, hasSpotifyClientId: Boolean(spotifyClientId) };
+});
+
 ipcMain.handle('settings:clear-spotify-token', async () => {
   const settings = await readUserSettings();
   const nextSettings = { ...settings, spotifyToken: '' };
   await writeUserSettings(nextSettings);
   return { saved: true, hasSpotifyToken: false };
+});
+
+ipcMain.handle('spotify:connect', async (_event, clientId) => {
+  return connectSpotifyAccount(clientId);
+});
+
+ipcMain.handle('spotify:start-login', async (event, clientId) => {
+  return startSpotifyLogin(clientId, event.sender);
+});
+
+ipcMain.handle('open-external', async (_event, url) => {
+  const target = String(url || '');
+  if (!/^https:\/\/accounts\.spotify\.com\/authorize\?/i.test(target)) return false;
+  await shell.openExternal(target);
+  return true;
+});
+
+ipcMain.handle('spotify:disconnect', async () => {
+  const settings = await readUserSettings();
+  const nextSettings = {
+    ...settings,
+    spotifyAuth: null
+  };
+  await writeUserSettings(nextSettings);
+  return { connected: false };
 });
 
 ipcMain.handle('select-output-dir', async () => {
@@ -211,8 +317,8 @@ ipcMain.handle('download:resume', () => {
 
 ipcMain.handle('spotify:preview', async (_event, payload) => {
   const { spotifyToken, spotifyPlaylistUrl } = payload || {};
-  if (!spotifyToken || !spotifyPlaylistUrl) {
-    throw new Error('Token e link da playlist do Spotify são obrigatórios.');
+  if (!spotifyPlaylistUrl) {
+    throw new Error('Link da playlist do Spotify é obrigatório.');
   }
 
   const playlistId = extractSpotifyPlaylistId(spotifyPlaylistUrl);
@@ -220,7 +326,7 @@ ipcMain.handle('spotify:preview', async (_event, payload) => {
     throw new Error('Não foi possível identificar o ID da playlist do Spotify.');
   }
 
-  const previewData = await fetchSpotifyPlaylist(spotifyToken, playlistId, 50);
+  const previewData = await fetchSpotifyPlaylistWithBestAuth(spotifyToken, playlistId, 50);
   return previewData;
 });
 
@@ -237,8 +343,8 @@ ipcMain.on('download:start', async (event, payload) => {
     } = payload;
 
     if (source === 'spotify') {
-      if (!spotifyToken || !spotifyPlaylistUrl || !outputDir) {
-        event.sender.send('download:error', 'Token e link da playlist do Spotify são obrigatórios.');
+      if (!spotifyPlaylistUrl || !outputDir) {
+        event.sender.send('download:error', 'Link da playlist do Spotify e pasta de destino são obrigatórios.');
         resetPauseState(null);
         return;
       }
@@ -291,7 +397,7 @@ ipcMain.on('download:start', async (event, payload) => {
       }
 
       event.sender.send('download:log', '[INFO] Buscando faixas da playlist no Spotify...');
-      const playlistData = await fetchSpotifyPlaylist(spotifyToken, playlistId);
+      const playlistData = await fetchSpotifyPlaylistWithBestAuth(spotifyToken, playlistId);
       const spotifyTracks = playlistData.tracks || [];
       const playlistName = playlistData.name || 'Spotify Playlist';
 
@@ -472,15 +578,27 @@ function getUserSettingsPath() {
   return path.join(app.getPath('userData'), 'soundforge-settings.json');
 }
 
+function getDefaultSpotifyClientId() {
+  if (ENV_SPOTIFY_CLIENT_ID) return ENV_SPOTIFY_CLIENT_ID;
+  try {
+    const packageJson = require(path.join(__dirname, '..', 'package.json'));
+    return normalizeSpotifyClientId(packageJson?.soundforge?.spotifyClientId);
+  } catch {
+    return '';
+  }
+}
+
 async function readUserSettings() {
   try {
     const raw = await fs.promises.readFile(getUserSettingsPath(), 'utf8');
     const parsed = JSON.parse(raw);
     return {
-      spotifyToken: typeof parsed.spotifyToken === 'string' ? parsed.spotifyToken : ''
+      spotifyToken: typeof parsed.spotifyToken === 'string' ? parsed.spotifyToken : '',
+      spotifyClientId: typeof parsed.spotifyClientId === 'string' ? parsed.spotifyClientId : '',
+      spotifyAuth: parsed.spotifyAuth && typeof parsed.spotifyAuth === 'object' ? parsed.spotifyAuth : null
     };
   } catch {
-    return { spotifyToken: '' };
+    return { spotifyToken: '', spotifyClientId: '', spotifyAuth: null };
   }
 }
 
@@ -894,6 +1012,18 @@ async function fetchSpotifyPlaylist(token, playlistId, maxTracks = null) {
   }
 }
 
+async function fetchSpotifyPlaylistWithBestAuth(manualToken, playlistId, maxTracks = null) {
+  try {
+    const accessToken = await resolveSpotifyAccessToken(manualToken);
+    return await fetchSpotifyPlaylist(accessToken, playlistId, maxTracks);
+  } catch (err) {
+    if (err?.publicFallback || [401, 403, 404].includes(Number(err?.statusCode))) {
+      return fetchSpotifyEmbedPlaylist(playlistId, maxTracks);
+    }
+    throw err;
+  }
+}
+
 async function fetchSpotifyPlaylistFromApi(token, playlistId, maxTracks = null) {
   const playlist = await fetchSpotifyApi(
     `/v1/playlists/${playlistId}?fields=name`,
@@ -1008,6 +1138,253 @@ function fetchSpotifyEmbedHtml(playlistId) {
 
 function normalizeSpotifyToken(token) {
   return String(token || '').trim().replace(/^Bearer\s+/i, '').trim();
+}
+
+function normalizeSpotifyClientId(clientId) {
+  return String(clientId || '').trim();
+}
+
+function base64Url(buffer) {
+  return buffer
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
+function makeSpotifyVerifier() {
+  return base64Url(crypto.randomBytes(64));
+}
+
+function makeSpotifyChallenge(verifier) {
+  return base64Url(crypto.createHash('sha256').update(verifier).digest());
+}
+
+function waitForSpotifyProtocolCallback(expectedState) {
+  return new Promise((resolve, reject) => {
+    if (pendingSpotifyCallback) {
+      pendingSpotifyCallback.reject(new Error('Um login Spotify anterior foi substituido por uma nova tentativa.'));
+    }
+
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      pendingSpotifyCallback = null;
+      reject(new Error('Tempo esgotado esperando o login do Spotify.'));
+    }, 5 * 60 * 1000);
+
+    const finish = ({ state, code, error }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      pendingSpotifyCallback = null;
+
+      if (state !== expectedState) {
+        reject(new Error('O retorno do Spotify nao confere com a sessao iniciada.'));
+        return;
+      }
+      if (error) {
+        reject(new Error(`Login Spotify cancelado ou recusado: ${error}.`));
+        return;
+      }
+      if (!code) {
+        reject(new Error('O Spotify nao retornou o codigo de autorizacao.'));
+        return;
+      }
+
+      resolve(code);
+    };
+
+    pendingSpotifyCallback = { finish, reject };
+  });
+}
+
+async function connectSpotifyAccount(clientIdOverride = '') {
+  const settings = await readUserSettings();
+  const clientId = normalizeSpotifyClientId(clientIdOverride) || normalizeSpotifyClientId(settings.spotifyClientId) || getDefaultSpotifyClientId();
+  if (!clientId) {
+    throw new Error('Salve o Client ID do Spotify antes de conectar a conta.');
+  }
+
+  const login = buildSpotifyLoginRequest(clientId);
+  const callbackPromise = waitForSpotifyProtocolCallback(login.state);
+  await shell.openExternal(login.authUrl);
+  const code = await callbackPromise;
+  const tokenData = await requestSpotifyToken({
+    grant_type: 'authorization_code',
+    code,
+    redirect_uri: SPOTIFY_REDIRECT_URI,
+    client_id: clientId,
+    code_verifier: login.verifier
+  });
+
+  const spotifyAuth = buildSpotifyAuth(tokenData, clientId, settings.spotifyAuth);
+  await writeUserSettings({ ...settings, spotifyClientId: clientId, spotifyAuth });
+  return {
+    connected: true,
+    expiresAt: spotifyAuth.expiresAt,
+    redirectUri: SPOTIFY_REDIRECT_URI
+  };
+}
+
+async function startSpotifyLogin(clientIdOverride = '', sender = null) {
+  const settings = await readUserSettings();
+  const clientId = normalizeSpotifyClientId(clientIdOverride) || normalizeSpotifyClientId(settings.spotifyClientId) || getDefaultSpotifyClientId();
+  if (!clientId) {
+    throw new Error('Salve o Client ID do Spotify antes de conectar a conta.');
+  }
+
+  const login = buildSpotifyLoginRequest(clientId);
+  waitForSpotifyProtocolCallback(login.state)
+    .then(async (code) => {
+      const tokenData = await requestSpotifyToken({
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: SPOTIFY_REDIRECT_URI,
+        client_id: clientId,
+        code_verifier: login.verifier
+      });
+
+      const spotifyAuth = buildSpotifyAuth(tokenData, clientId, settings.spotifyAuth);
+      await writeUserSettings({ ...settings, spotifyClientId: clientId, spotifyAuth });
+      if (sender && !sender.isDestroyed()) {
+        sender.send('spotify:auth-complete', {
+          connected: true,
+          expiresAt: spotifyAuth.expiresAt,
+          redirectUri: SPOTIFY_REDIRECT_URI
+        });
+      }
+    })
+    .catch((err) => {
+      if (sender && !sender.isDestroyed()) {
+        sender.send('spotify:auth-complete', {
+          connected: false,
+          error: err?.message || 'Não consegui concluir o login Spotify.'
+        });
+      }
+    });
+
+  return {
+    authUrl: login.authUrl,
+    state: login.state,
+    redirectUri: SPOTIFY_REDIRECT_URI
+  };
+}
+
+function buildSpotifyLoginRequest(clientId) {
+  const verifier = makeSpotifyVerifier();
+  const challenge = makeSpotifyChallenge(verifier);
+  const state = base64Url(crypto.randomBytes(24));
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id: clientId,
+    scope: SPOTIFY_SCOPES.join(' '),
+    redirect_uri: SPOTIFY_REDIRECT_URI,
+    code_challenge_method: 'S256',
+    code_challenge: challenge,
+    state
+  });
+
+  return {
+    verifier,
+    state,
+    authUrl: `https://accounts.spotify.com/authorize?${params.toString()}`
+  };
+}
+
+async function resolveSpotifyAccessToken(manualToken = '') {
+  const token = normalizeSpotifyToken(manualToken);
+  const settings = await readUserSettings();
+  const auth = settings.spotifyAuth;
+
+  if (auth?.accessToken && Number(auth.expiresAt || 0) > Date.now() + 60000) {
+    return auth.accessToken;
+  }
+
+  if (auth?.refreshToken && settings.spotifyClientId) {
+    try {
+      const tokenData = await requestSpotifyToken({
+        grant_type: 'refresh_token',
+        refresh_token: auth.refreshToken,
+        client_id: settings.spotifyClientId
+      });
+      const nextAuth = buildSpotifyAuth(tokenData, settings.spotifyClientId, auth);
+      await writeUserSettings({ ...settings, spotifyAuth: nextAuth });
+      return nextAuth.accessToken;
+    } catch (err) {
+      if (token) return token;
+      err.publicFallback = true;
+      throw err;
+    }
+  }
+
+  if (token) return token;
+  const err = new Error('Sem sessão Spotify. Tentando ler a prévia pública da playlist.');
+  err.publicFallback = true;
+  throw err;
+}
+
+function buildSpotifyAuth(tokenData, clientId, previousAuth = null) {
+  const accessToken = tokenData?.access_token || '';
+  const refreshToken = tokenData?.refresh_token || previousAuth?.refreshToken || '';
+  const expiresIn = Number(tokenData?.expires_in || 3600);
+  if (!accessToken || !refreshToken) {
+    throw new Error('O Spotify não retornou uma sessão completa para o Soundforge.');
+  }
+
+  return {
+    clientId,
+    accessToken,
+    refreshToken,
+    expiresAt: Date.now() + Math.max(60, expiresIn - 30) * 1000
+  };
+}
+
+function requestSpotifyToken(params) {
+  return new Promise((resolve, reject) => {
+    const body = new URLSearchParams(params).toString();
+    const req = https.request(
+      {
+        hostname: 'accounts.spotify.com',
+        path: '/api/token',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(body)
+        }
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => {
+          data += chunk.toString('utf8');
+        });
+        res.on('end', () => {
+          if (res.statusCode !== 200) {
+            reject(new Error(parseSpotifyApiError(data) || `Spotify Auth retornou HTTP ${res.statusCode}.`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(data));
+          } catch (err) {
+            reject(err);
+          }
+        });
+      }
+    );
+
+    req.on('error', (err) => reject(err));
+    req.write(body);
+    req.end();
+  });
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 function parseSpotifyApiError(data) {

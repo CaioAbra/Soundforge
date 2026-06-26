@@ -181,8 +181,13 @@ export default function App() {
   const [quality, setQuality] = useState('5');
   const [source, setSource] = useState('youtube');
   const [spotifyToken, setSpotifyToken] = useState('');
+  const [spotifyClientId, setSpotifyClientId] = useState('');
+  const [spotifyRedirectUri, setSpotifyRedirectUri] = useState('');
+  const [spotifyLoginUrl, setSpotifyLoginUrl] = useState('');
+  const [hasDefaultSpotifyClientId, setHasDefaultSpotifyClientId] = useState(false);
   const [tokenSaveState, setTokenSaveState] = useState('');
   const [hasSavedSpotifyToken, setHasSavedSpotifyToken] = useState(false);
+  const [hasSpotifyAuth, setHasSpotifyAuth] = useState(false);
   const [appVersion, setAppVersion] = useState('');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [spotifyPlaylistUrl, setSpotifyPlaylistUrl] = useState('');
@@ -210,33 +215,40 @@ export default function App() {
   const isReady = useMemo(() => {
     if (source === 'spotify') {
       return (
-        spotifyToken.trim().length > 0 &&
         spotifyPlaylistUrl.trim().length > 0 &&
         outputDir.trim().length > 0
       );
     }
     return url.trim().length > 0 && outputDir.trim().length > 0;
-  }, [source, spotifyToken, spotifyPlaylistUrl, url, outputDir]);
+  }, [source, spotifyPlaylistUrl, url, outputDir]);
   const progressPercent = Number.isFinite(progress.percent) ? Math.min(100, Math.max(0, progress.percent)) : 0;
   const progressLabel = `${progressPercent.toFixed(1)}%`;
   const trackLabel = progress.title || (isDownloading ? 'Invocando faixa...' : 'Nenhuma faixa em execução');
   const playlistLabel =
     progress.itemIndex && progress.itemCount ? `Faixa ${progress.itemIndex} de ${progress.itemCount}` : null;
-  const hasSpotifyToken = hasSavedSpotifyToken || spotifyToken.trim().length > 0;
-  const showSpotifyTokenWarning = source === 'spotify' && !hasSpotifyToken;
-  const showSubtleSpotifyNotice = source !== 'spotify' && !hasSavedSpotifyToken;
+  const hasSpotifyAccess = hasSpotifyAuth || hasSavedSpotifyToken || spotifyToken.trim().length > 0;
+  const showSpotifyPublicNotice = source === 'spotify' && !hasSpotifyAccess;
+  const showSubtleSpotifyNotice = source !== 'spotify' && !hasSpotifyAuth && !hasSavedSpotifyToken;
   const hasDashboardContent = isDownloading || logs.length > 0 || downloadedTracks.length > 0 || skippedTracks.length > 0;
   const pauseButtonLabel = pauseState === 'paused' ? 'Continuar' : pauseState === 'pausing' ? 'Pausando...' : 'Pausar';
   const pauseButtonHint = pauseState === 'paused' ? 'Retomar de onde parou' : 'Para após a faixa atual';
+  const canConnectSpotify = hasDefaultSpotifyClientId || spotifyClientId.trim().length > 0;
   useEffect(() => {
     if (!window.soundforge) return;
 
     window.soundforge.getSettings?.().then((settings) => {
       if (settings?.appVersion) setAppVersion(settings.appVersion);
+      if (settings?.spotifyClientId) setSpotifyClientId(settings.spotifyClientId);
+      if (settings?.spotifyRedirectUri) setSpotifyRedirectUri(settings.spotifyRedirectUri);
+      setHasDefaultSpotifyClientId(Boolean(settings?.hasDefaultSpotifyClientId));
+      if (settings?.hasSpotifyAuth) {
+        setHasSpotifyAuth(true);
+        setTokenSaveState('Spotify conectado neste computador.');
+      }
       if (settings?.spotifyToken) {
         setSpotifyToken(settings.spotifyToken);
         setHasSavedSpotifyToken(true);
-        setTokenSaveState('Token carregado deste computador.');
+        if (!settings?.hasSpotifyAuth) setTokenSaveState('Token carregado deste computador.');
       }
     }).catch(() => {});
 
@@ -295,6 +307,16 @@ export default function App() {
       appendReportLines(setLogs, [`Falha na forja: ${message || 'download interrompido.'}`]);
     });
 
+    window.soundforge.onSpotifyAuthComplete?.((result) => {
+      if (result?.connected) {
+        setHasSpotifyAuth(true);
+        setSpotifyLoginUrl('');
+        setTokenSaveState('Spotify conectado. O Soundforge renovará a sessão automaticamente.');
+        return;
+      }
+      setTokenSaveState(result?.error || 'Não consegui concluir o login Spotify.');
+    });
+
     window.soundforge.onUpdateDownloaded?.((info) => {
       setReadyUpdate(info || {});
       setStatus(`Atualização ${info?.version || ''} pronta para instalar.`.trim());
@@ -318,7 +340,7 @@ export default function App() {
   useEffect(() => {
     setSpotifyPreview(null);
     setPreviewError('');
-  }, [source, spotifyPlaylistUrl, spotifyToken]);
+  }, [source, spotifyPlaylistUrl, spotifyToken, hasSpotifyAuth]);
 
   const handleSelectFolder = async () => {
     if (!window.soundforge) return;
@@ -383,6 +405,49 @@ export default function App() {
     }
   };
 
+  const handleSaveSpotifyClientId = async () => {
+    if (!window.soundforge?.saveSpotifyClientId || !spotifyClientId.trim()) return;
+    setTokenSaveState('Salvando Client ID...');
+    try {
+      await window.soundforge.saveSpotifyClientId(spotifyClientId.trim());
+      setTokenSaveState('Client ID salvo. Você já pode conectar o Spotify.');
+    } catch {
+      setTokenSaveState('Não consegui salvar o Client ID.');
+    }
+  };
+
+  const handleConnectSpotify = async () => {
+    if (!window.soundforge?.startSpotifyLogin || isDownloading) return;
+    setTokenSaveState('Gerando link de login do Spotify...');
+    try {
+      const result = await window.soundforge.startSpotifyLogin(spotifyClientId.trim());
+      setSpotifyLoginUrl(result?.authUrl || '');
+      if (result?.authUrl) {
+        await window.soundforge.openExternal?.(result.authUrl);
+      }
+      setTokenSaveState('Login aberto no navegador. Se não abrir, use o botão de login abaixo.');
+    } catch (err) {
+      setTokenSaveState(err?.message || 'Não consegui conectar o Spotify.');
+    }
+  };
+
+  const handleOpenSpotifyLoginUrl = async () => {
+    if (!spotifyLoginUrl || !window.soundforge?.openExternal) return;
+    await window.soundforge.openExternal(spotifyLoginUrl);
+  };
+
+  const handleDisconnectSpotify = async () => {
+    if (!window.soundforge?.disconnectSpotify || isDownloading) return;
+    setTokenSaveState('Desconectando Spotify...');
+    try {
+      await window.soundforge.disconnectSpotify();
+      setHasSpotifyAuth(false);
+      setTokenSaveState('Spotify desconectado deste computador.');
+    } catch {
+      setTokenSaveState('Não consegui desconectar o Spotify.');
+    }
+  };
+
   const handleClearSpotifyToken = async () => {
     if (!window.soundforge?.clearSpotifyToken) return;
     setTokenSaveState('Removendo token...');
@@ -398,7 +463,7 @@ export default function App() {
 
   const handleSpotifyPreview = async () => {
     if (!window.soundforge || isPreviewing || isDownloading) return;
-    if (!spotifyToken.trim() || !spotifyPlaylistUrl.trim()) return;
+    if (!spotifyPlaylistUrl.trim()) return;
     setPreviewError('');
     setIsPreviewing(true);
     try {
@@ -448,11 +513,11 @@ export default function App() {
               </label>
             ))}
           </div>
-          {showSpotifyTokenWarning && (
-            <p className="source-notice warning">Spotify indisponível: nenhum token configurado.</p>
+          {showSpotifyPublicNotice && (
+            <p className="source-notice subtle">Sem login, o Soundforge tenta ler apenas a prévia pública da playlist.</p>
           )}
           {showSubtleSpotifyNotice && (
-            <p className="source-notice subtle">Spotify sem token salvo neste computador.</p>
+            <p className="source-notice subtle">Spotify ainda não conectado neste computador.</p>
           )}
         </div>
 
@@ -475,41 +540,30 @@ export default function App() {
 
         {source === 'spotify' && (
           <>
-            {!hasSavedSpotifyToken && (
-              <div className="control-field control-field-wide spotify-token-block">
-                <label className="label token-label">Token do Spotify</label>
-                <input
-                  className="input"
-                  type="password"
-                  placeholder="Cole aqui seu token Bearer"
-                  value={spotifyToken}
-                  onChange={(event) => {
-                    setSpotifyToken(event.target.value);
-                    setTokenSaveState('');
-                  }}
-                />
-              </div>
-            )}
             <div className="preview-row">
-              {!hasSavedSpotifyToken && (
+              {!hasSpotifyAuth && (
                 <button
-                  className="button ghost"
+                  className="button update"
                   type="button"
-                  onClick={handleSaveSpotifyToken}
-                  disabled={!spotifyToken.trim() || isDownloading}
+                  onClick={canConnectSpotify ? handleConnectSpotify : () => setIsSettingsOpen(true)}
+                  disabled={isDownloading}
                 >
-                  Salvar token
+                  Conectar Spotify
                 </button>
               )}
               <button
                 className="button ghost"
                 type="button"
                 onClick={handleSpotifyPreview}
-                disabled={!spotifyToken.trim() || !spotifyPlaylistUrl.trim() || isPreviewing || isDownloading}
+                disabled={!spotifyPlaylistUrl.trim() || isPreviewing || isDownloading}
               >
                 {isPreviewing ? 'Carregando prévia...' : 'Ver prévia da playlist'}
               </button>
-              {!hasSavedSpotifyToken && tokenSaveState && <span className="helper success">{tokenSaveState}</span>}
+              {spotifyLoginUrl && !hasSpotifyAuth && (
+                <button className="button ghost" type="button" onClick={handleOpenSpotifyLoginUrl}>
+                  Abrir login no Spotify
+                </button>
+              )}
               {previewError && <span className="helper error">{previewError}</span>}
             </div>
             {spotifyPreview && (
@@ -728,15 +782,70 @@ export default function App() {
               </button>
             </div>
 
-            <div className="settings-section">
-              <span className="settings-label">Versão do app</span>
-              <strong>{appVersion ? `v${appVersion}` : 'Versão local'}</strong>
+            <div className="settings-about">
+              <img className="settings-about-logo" src={logoSoundforge} alt="Soundforge" />
+              <div>
+                <span className="settings-label">Sobre</span>
+                <strong>Soundforge</strong>
+                <p>Forja sonora para baixar MP3 do YouTube e playlists do Spotify, com metadados e atualizações automáticas.</p>
+              </div>
             </div>
 
             <div className="settings-section">
               <span className="settings-label">Spotify</span>
-              <strong>{hasSavedSpotifyToken ? 'Token salvo neste computador' : 'Nenhum token salvo'}</strong>
-              <label className="label settings-token-label">Editar token</label>
+              <strong>{hasSpotifyAuth ? 'Conta Spotify conectada' : hasSavedSpotifyToken ? 'Token manual salvo neste computador' : 'Spotify não conectado'}</strong>
+              <p className="helper">
+                Sem login, o app tenta ler playlists públicas. Para mais estabilidade, conecte uma conta Spotify.
+              </p>
+              {hasDefaultSpotifyClientId && (
+                <p className="helper success">Login Spotify pronto para uso neste build.</p>
+              )}
+              <label className="label settings-token-label">Client ID próprio do Spotify</label>
+              <input
+                className="input"
+                type="text"
+                placeholder="Opcional: cole aqui o Client ID do seu app Spotify"
+                value={spotifyClientId}
+                onChange={(event) => {
+                  setSpotifyClientId(event.target.value);
+                  setTokenSaveState('');
+                }}
+              />
+              {spotifyRedirectUri && (
+                <p className="helper">Para usar Client ID próprio, cadastre este Redirect URI no Spotify: {spotifyRedirectUri}</p>
+              )}
+              <div className="settings-actions">
+                <button
+                  className="button ghost"
+                  type="button"
+                  onClick={handleSaveSpotifyClientId}
+                  disabled={!spotifyClientId.trim() || isDownloading}
+                >
+                  Salvar Client ID
+                </button>
+                <button
+                  className="button update"
+                  type="button"
+                  onClick={handleConnectSpotify}
+                  disabled={!canConnectSpotify || isDownloading}
+                >
+                  {hasSpotifyAuth ? 'Reconectar Spotify' : 'Conectar Spotify'}
+                </button>
+                {spotifyLoginUrl && !hasSpotifyAuth && (
+                  <button className="button ghost" type="button" onClick={handleOpenSpotifyLoginUrl}>
+                    Abrir login no Spotify
+                  </button>
+                )}
+                <button
+                  className="button danger"
+                  type="button"
+                  onClick={handleDisconnectSpotify}
+                  disabled={!hasSpotifyAuth || isDownloading}
+                >
+                  Desconectar
+                </button>
+              </div>
+              <label className="label settings-token-label">Token manual</label>
               <input
                 className="input"
                 type="password"
@@ -765,7 +874,7 @@ export default function App() {
                   Limpar token
                 </button>
               </div>
-              {tokenSaveState && <p className="helper success">{tokenSaveState}</p>}
+              {tokenSaveState && <p className={`helper ${tokenSaveState.includes('Não consegui') ? 'error' : 'success'}`}>{tokenSaveState}</p>}
             </div>
 
             <footer className="settings-footer">

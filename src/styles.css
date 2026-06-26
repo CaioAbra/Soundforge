@@ -1068,6 +1068,43 @@ body::before {
   border-top: 1px solid rgba(255, 238, 205, 0.12);
 }
 
+.settings-about {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+  padding: 16px;
+  margin-bottom: 6px;
+  border: 1px solid rgba(232, 181, 90, 0.24);
+  border-radius: 16px;
+  background: rgba(25, 21, 16, 0.34);
+}
+
+.settings-about-logo {
+  width: 72px;
+  height: 72px;
+  border-radius: 16px;
+  object-fit: cover;
+  border: 1px solid rgba(232, 181, 90, 0.28);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
+}
+
+.settings-about strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--ink);
+  font-size: 1.16rem;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.settings-about p {
+  margin: 6px 0 0;
+  color: var(--muted-strong);
+  font-size: var(--type-sm);
+  line-height: 1.45;
+}
+
 .settings-label {
   font-family: 'Cinzel', serif;
   font-size: var(--type-xs);
@@ -1228,6 +1265,16 @@ body::before {
 
   .settings-actions {
     flex-direction: column;
+  }
+
+  .settings-about {
+    grid-template-columns: 58px minmax(0, 1fr);
+    padding: 14px;
+  }
+
+  .settings-about-logo {
+    width: 58px;
+    height: 58px;
   }
 
   .app-footer {
