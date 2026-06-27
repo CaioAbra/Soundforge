@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, Menu, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, shell, clipboard } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -39,6 +39,16 @@ const downloadPause = {
 
 let pendingSpotifyCallback = null;
 let mainWindow = null;
+let ytDlpPreparePromise = null;
+let ffmpegLocationCache = null;
+let ffmpegLocationChecked = false;
+const toolsStatus = {
+  state: 'idle',
+  ytDlpReady: false,
+  ffmpegReady: false,
+  message: 'Ferramentas ainda nao verificadas.',
+  updatedAt: null
+};
 
 function sendPauseState(state) {
   if (!downloadPause.sender || downloadPause.sender.isDestroyed()) return;
@@ -101,6 +111,9 @@ function createWindow() {
 
   win.setMenuBarVisibility(false);
   mainWindow = win;
+  win.webContents.once('did-finish-load', () => {
+    warmUpTools(win);
+  });
   return win;
 }
 
@@ -224,6 +237,13 @@ ipcMain.handle('update:restart-and-install', () => {
   return true;
 });
 
+ipcMain.handle('tools:status', () => getToolsStatus());
+
+ipcMain.handle('clipboard:write-text', (_event, text) => {
+  clipboard.writeText(String(text || ''));
+  return true;
+});
+
 ipcMain.handle('settings:get', async () => {
   const settings = await readUserSettings();
   return {
@@ -283,6 +303,17 @@ ipcMain.handle('spotify:disconnect', async () => {
   };
   await writeUserSettings(nextSettings);
   return { connected: false };
+});
+
+ipcMain.handle('spotify:test-connection', async (_event, manualToken = '') => {
+  const accessToken = await resolveSpotifyAccessToken(manualToken);
+  const profile = await fetchSpotifyApi('/v1/me', accessToken);
+  return {
+    ok: true,
+    id: profile?.id || '',
+    name: profile?.display_name || profile?.id || 'Conta Spotify',
+    product: profile?.product || ''
+  };
 });
 
 ipcMain.handle('select-output-dir', async () => {
@@ -366,7 +397,7 @@ ipcMain.on('download:start', async (event, payload) => {
       return;
     }
 
-    const ffmpegLocation = resolveFfmpegLocation();
+    const ffmpegLocation = getCachedFfmpegLocation();
     if (!ffmpegLocation) {
       event.sender.send(
         'download:log',
@@ -432,6 +463,7 @@ ipcMain.on('download:start', async (event, payload) => {
         const downloaded = await downloadSpotifyTrack({
           ytDlpBin,
           outputTemplate,
+          expectedOutputFile: outputFile,
           quality,
           ffmpegLocation,
           query,
@@ -611,29 +643,38 @@ async function writeUserSettings(settings) {
 async function ensureYtDlpBinary(event) {
   const existing = resolveYtDlpBinary();
   if (existing) return existing;
+  if (ytDlpPreparePromise) return ytDlpPreparePromise;
 
-  const targetDir = getUserYtDlpDir();
-  const targetPath = getUserYtDlpBinaryPath();
+  ytDlpPreparePromise = (async () => {
+    const targetDir = getUserYtDlpDir();
+    const targetPath = getUserYtDlpBinaryPath();
 
-  event?.sender.send(
-    'download:log',
-    '[INFO] yt-dlp não encontrado. Baixando automaticamente para o perfil do usuário.'
-  );
+    event?.sender.send(
+      'download:log',
+      '[INFO] yt-dlp não encontrado. Baixando automaticamente para o perfil do usuário.'
+    );
 
-  await fs.promises.mkdir(targetDir, { recursive: true });
-  await downloadFile(
-    'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe',
-    targetPath,
-    event
-  );
+    await fs.promises.mkdir(targetDir, { recursive: true });
+    await downloadFile(
+      'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe',
+      targetPath,
+      event
+    );
+
+    try {
+      fs.chmodSync(targetPath, 0o755);
+    } catch {
+      // Ignore permission errors on Windows.
+    }
+
+    return targetPath;
+  })();
 
   try {
-    fs.chmodSync(targetPath, 0o755);
-  } catch {
-    // Ignora erros de permissão no Windows.
+    return await ytDlpPreparePromise;
+  } finally {
+    ytDlpPreparePromise = null;
   }
-
-  return targetPath;
 }
 
 function downloadFile(url, dest, event) {
@@ -717,6 +758,52 @@ function resolveFfmpegLocation() {
   return null;
 }
 
+function getCachedFfmpegLocation() {
+  if (ffmpegLocationChecked && ffmpegLocationCache) return ffmpegLocationCache;
+  ffmpegLocationCache = resolveFfmpegLocation();
+  ffmpegLocationChecked = true;
+  return ffmpegLocationCache;
+}
+
+function getToolsStatus() {
+  return { ...toolsStatus };
+}
+
+function updateToolsStatus(win, partial) {
+  Object.assign(toolsStatus, partial, { updatedAt: Date.now() });
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('tools:status', getToolsStatus());
+  }
+}
+
+async function warmUpTools(win) {
+  updateToolsStatus(win, {
+    state: 'preparing',
+    message: 'Preparando ferramentas em segundo plano.'
+  });
+
+  try {
+    const ytDlpBin = await ensureYtDlpBinary(null);
+    const ffmpegLocation = getCachedFfmpegLocation();
+
+    updateToolsStatus(win, {
+      state: ffmpegLocation ? 'ready' : 'warning',
+      ytDlpReady: Boolean(ytDlpBin),
+      ffmpegReady: Boolean(ffmpegLocation),
+      message: ffmpegLocation
+        ? 'Ferramentas prontas para baixar.'
+        : 'yt-dlp pronto. ffmpeg/ffprobe nao encontrados.'
+    });
+  } catch (err) {
+    updateToolsStatus(win, {
+      state: 'error',
+      ytDlpReady: false,
+      ffmpegReady: Boolean(getCachedFfmpegLocation()),
+      message: err?.message || 'Nao foi possivel preparar as ferramentas.'
+    });
+  }
+}
+
 function safeDecode(value) {
   if (!value || typeof value !== 'string') return value;
   try {
@@ -745,6 +832,7 @@ function buildYtDlpArgs({
   playlistItems = null
 }) {
   const args = [
+    '--format', 'bestaudio/best[acodec!=none]',
     '--extract-audio',
     '--audio-format', 'mp3',
     '--audio-quality', String(quality || '5'),
@@ -780,7 +868,16 @@ function buildYtDlpArgs({
   return args;
 }
 
-async function downloadSpotifyTrack({ ytDlpBin, outputTemplate, quality, ffmpegLocation, query, event, sendProgress }) {
+async function downloadSpotifyTrack({
+  ytDlpBin,
+  outputTemplate,
+  expectedOutputFile,
+  quality,
+  ffmpegLocation,
+  query,
+  event,
+  sendProgress
+}) {
   const attempts = [];
 
   for (const source of SPOTIFY_TRACK_SOURCES) {
@@ -795,6 +892,21 @@ async function downloadSpotifyTrack({ ytDlpBin, outputTemplate, quality, ffmpegL
 
     const code = await runYtDlp(ytDlpBin, args, event, sendProgress);
     if (code === 0) {
+      const validation = await validateDownloadedAudioFile({
+        filePath: expectedOutputFile,
+        ffmpegLocation
+      });
+
+      if (!validation.ok) {
+        await cleanupInvalidDownloadArtifacts(expectedOutputFile);
+        attempts.push(`${source.label}: ${validation.reason}`);
+        event.sender.send(
+          'download:log',
+          `[AVISO] ${source.label} retornou um arquivo sem audio (${validation.reason}). Tentando outra fonte...`
+        );
+        continue;
+      }
+
       event.sender.send('download:log', `[INFO] Fonte encontrada: ${source.label}.`);
       return { ok: true, source: source.label, sources: attempts.concat(source.label) };
     }
@@ -1513,6 +1625,67 @@ function resolveFfmpegBinary(ffmpegLocation) {
   return null;
 }
 
+function resolveFfprobeBinary(ffmpegLocation) {
+  if (!ffmpegLocation) return null;
+  const windowsCandidate = path.join(ffmpegLocation, 'ffprobe.exe');
+  if (fs.existsSync(windowsCandidate)) return windowsCandidate;
+  const unixCandidate = path.join(ffmpegLocation, 'ffprobe');
+  if (fs.existsSync(unixCandidate)) return unixCandidate;
+  return null;
+}
+
+async function validateDownloadedAudioFile({ filePath, ffmpegLocation }) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return { ok: false, reason: 'MP3 final nao foi criado' };
+  }
+
+  const stats = await fs.promises.stat(filePath).catch(() => null);
+  if (!stats || stats.size < 16 * 1024) {
+    return { ok: false, reason: 'arquivo final vazio ou pequeno demais' };
+  }
+
+  const ffprobeBin = resolveFfprobeBinary(ffmpegLocation);
+  if (!ffprobeBin) {
+    return { ok: true };
+  }
+
+  try {
+    const output = await runProcessCapture(ffprobeBin, [
+      '-v', 'error',
+      '-select_streams', 'a:0',
+      '-show_entries', 'stream=codec_type',
+      '-of', 'csv=p=0',
+      filePath
+    ]);
+
+    if (output.stdout.trim().split(/\r?\n/).includes('audio')) {
+      return { ok: true };
+    }
+
+    return { ok: false, reason: 'nenhuma faixa de audio detectada' };
+  } catch {
+    return { ok: false, reason: 'ffprobe nao conseguiu ler audio no MP3' };
+  }
+}
+
+async function cleanupInvalidDownloadArtifacts(filePath) {
+  if (!filePath) return;
+
+  const parsed = path.parse(filePath);
+  const candidates = [
+    filePath,
+    path.join(parsed.dir, `${parsed.name}.jpg`),
+    path.join(parsed.dir, `${parsed.name}.jpeg`),
+    path.join(parsed.dir, `${parsed.name}.png`),
+    path.join(parsed.dir, `${parsed.name}.webp`),
+    path.join(parsed.dir, `${parsed.name}.m4a`),
+    path.join(parsed.dir, `${parsed.name}.webm`),
+    path.join(parsed.dir, `${parsed.name}.part`)
+  ];
+
+  await Promise.all(candidates.map((candidate) => fs.promises.unlink(candidate).catch(() => {})));
+}
+
 async function writeMp3Metadata({ ffmpegLocation, filePath, track, playlistName, trackNumber, trackTotal, coverUrl, event }) {
   const ffmpegBin = resolveFfmpegBinary(ffmpegLocation);
   if (!ffmpegBin || !filePath || !fs.existsSync(filePath)) return;
@@ -1624,6 +1797,34 @@ function runProcess(command, args) {
     proc.on('close', (code) => {
       if (code === 0) resolve();
       else reject(new Error(stderr || `Processo finalizou com código ${code}.`));
+    });
+  });
+}
+
+function runProcessCapture(command, args) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(command, args, {
+      shell: false,
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUTF8: '1'
+      }
+    });
+
+    let stdout = '';
+    let stderr = '';
+    proc.stdout.on('data', (chunk) => {
+      stdout += decodeBuffer(chunk);
+    });
+    proc.stderr.on('data', (chunk) => {
+      stderr += decodeBuffer(chunk);
+    });
+
+    proc.on('error', reject);
+    proc.on('close', (code) => {
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(new Error(stderr || `Processo finalizou com codigo ${code}.`));
     });
   });
 }
