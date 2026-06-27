@@ -1,6 +1,6 @@
 {
   "name": "soundforge",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Electron + React desktop app for forging MP3 downloads from YouTube and Spotify playlists.",
   "private": false,
   "main": "electron/main.js",
@@ -39,6 +39,7 @@
   "build": {
     "appId": "com.caioabra.soundforge",
     "productName": "Soundforge",
+    "electronDist": "node_modules/electron/dist",
     "directories": {
       "output": "release"
     },
