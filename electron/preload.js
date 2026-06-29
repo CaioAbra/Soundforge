@@ -1,4 +1,11 @@
-﻿const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer } = require('electron');
+
+// Helper: registra listener e retorna função de cleanup para evitar vazamento de memória
+const on = (channel, cb) => {
+  const handler = (_, data) => cb(data);
+  ipcRenderer.on(channel, handler);
+  return () => ipcRenderer.removeListener(channel, handler);
+};
 
 contextBridge.exposeInMainWorld('soundforge', {
   selectOutputDir: () => ipcRenderer.invoke('select-output-dir'),
@@ -17,15 +24,17 @@ contextBridge.exposeInMainWorld('soundforge', {
   startDownload: (payload) => ipcRenderer.send('download:start', payload),
   pauseDownload: () => ipcRenderer.invoke('download:pause'),
   resumeDownload: () => ipcRenderer.invoke('download:resume'),
-  onLog: (cb) => ipcRenderer.on('download:log', (_, data) => cb(data)),
-  onToolsStatus: (cb) => ipcRenderer.on('tools:status', (_, data) => cb(data)),
-  onProgress: (cb) => ipcRenderer.on('download:progress', (_, data) => cb(data)),
-  onPauseState: (cb) => ipcRenderer.on('download:pause-state', (_, data) => cb(data)),
-  onTrackComplete: (cb) => ipcRenderer.on('download:track-complete', (_, data) => cb(data)),
-  onTrackSkipped: (cb) => ipcRenderer.on('download:track-skipped', (_, data) => cb(data)),
-  onComplete: (cb) => ipcRenderer.on('download:complete', (_, data) => cb(data)),
-  onError: (cb) => ipcRenderer.on('download:error', (_, data) => cb(data)),
-  onSpotifyAuthComplete: (cb) => ipcRenderer.on('spotify:auth-complete', (_, data) => cb(data)),
-  onUpdateDownloaded: (cb) => ipcRenderer.on('update:downloaded', (_, data) => cb(data)),
-  restartAndInstallUpdate: () => ipcRenderer.invoke('update:restart-and-install')
+  restartAndInstallUpdate: () => ipcRenderer.invoke('update:restart-and-install'),
+
+  // Cada método retorna uma função de cleanup: const unsub = soundforge.onLog(cb); unsub();
+  onLog: (cb) => on('download:log', cb),
+  onToolsStatus: (cb) => on('tools:status', cb),
+  onProgress: (cb) => on('download:progress', cb),
+  onPauseState: (cb) => on('download:pause-state', cb),
+  onTrackComplete: (cb) => on('download:track-complete', cb),
+  onTrackSkipped: (cb) => on('download:track-skipped', cb),
+  onComplete: (cb) => on('download:complete', cb),
+  onError: (cb) => on('download:error', cb),
+  onSpotifyAuthComplete: (cb) => on('spotify:auth-complete', cb),
+  onUpdateDownloaded: (cb) => on('update:downloaded', cb)
 });

@@ -1,246 +1,132 @@
-﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { FiCheck, FiCheckCircle, FiCopy, FiEdit2, FiRefreshCw, FiSettings, FiTool, FiX } from 'react-icons/fi';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { FiSettings } from 'react-icons/fi';
 import logoSoundforge from './assets/logo_soundforge.png';
-
-const QUALITY_OPTIONS = [
-  { label: 'Melhor qualidade', detail: 'MP3 mais fiel', value: '0' },
-  { label: 'Alta', detail: 'Ótimo equilíbrio', value: '2' },
-  { label: 'Média', detail: 'Uso geral', value: '5' },
-  { label: 'Boa para voz', detail: 'Podcasts e falas', value: '7' },
-  { label: 'Menor arquivo', detail: 'Ocupa menos espaço', value: '9' }
-];
-
-const SOURCE_OPTIONS = [
-  { label: 'YouTube', value: 'youtube' },
-  { label: 'Spotify', value: 'spotify' }
-];
-
-const TRACK_FILTERS = [
-  { label: 'Todas', value: 'all' },
-  { label: 'Baixadas', value: 'downloaded' },
-  { label: 'Não baixadas', value: 'missing' },
-  { label: 'Com erro', value: 'error' }
-];
-
-const TECHNICAL_LOG_PATTERNS = [
-  /^\[debug\]/i,
-  /^debug:/i,
-  /^warning:/i,
-  /^error:/i,
-  /^\[youtube\].*api json/i,
-  /^\[youtube\].*downloading.*player/i,
-  /^\[info\]\s+available formats/i,
-  /^\[download\]\s+destination:/i,
-  /^\[download\]\s+\d{1,3}(?:\.\d+)?%/i,
-  /^\[download\]\s+got error/i,
-  /^\[download\]\s+retrying/i
-];
-
-const decodeLine = (line) => {
-  if (!line || typeof line !== 'string') return line;
-  try {
-    return decodeURIComponent(line);
-  } catch {
-    return line;
-  }
-};
-
-const stripLogPrefix = (line) => line.replace(/^\[(?:INFO|download|youtube|ExtractAudio)\]\s*/i, '').trim();
-
-const filenameFromPath = (value) => {
-  const filename = value.split(/[\\/]/).pop() || value;
-  return filename.replace(/\.[^/.]+$/, '').trim();
-};
-
-const liveLog = (text, key) => ({ text, key });
-const getLogText = (entry) => (typeof entry === 'string' ? entry : entry?.text || '');
-
-const formatReportLine = (line) => {
-  const cleaned = decodeLine(String(line || '').trim());
-  if (!cleaned) return [];
-
-  return cleaned
-    .split(/\r?\n/)
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .map((part) => {
-      const liveProgressMatch = part.match(/^\[PROGRESS\]\s+(.+)$/i);
-      if (liveProgressMatch) return liveLog(liveProgressMatch[1], 'download-progress');
-
-      if (TECHNICAL_LOG_PATTERNS.some((pattern) => pattern.test(part))) return null;
-
-      const spotifyMatch = part.match(/^\[INFO\]\s+Buscando faixas da playlist no Spotify/i);
-      if (spotifyMatch) return 'Lendo a playlist do Spotify.';
-
-      const youtubeSearchMatch = part.match(/^\[INFO\]\s+Buscando no YouTube:\s*(.+)$/i);
-      if (youtubeSearchMatch) return `Buscando na forja: ${youtubeSearchMatch[1]}`;
-
-      const huntMatch = part.match(/^\[INFO\]\s+Caçando em (.+?):\s*(.+)$/i);
-      if (huntMatch) return `Caçando em ${huntMatch[1]}: ${huntMatch[2]}`;
-
-      const sourceMatch = part.match(/^\[INFO\]\s+Fonte encontrada:\s*(.+?)\.$/i);
-      if (sourceMatch) return `Fonte encontrada: ${sourceMatch[1]}.`;
-
-      if (/^\[INFO\]\s+Pausa solicitada/i.test(part)) {
-        return 'Pausa solicitada. A faixa atual será finalizada primeiro.';
-      }
-
-      if (/^\[INFO\]\s+Download pausado/i.test(part)) {
-        return 'Download pausado. Pronto para continuar.';
-      }
-
-      if (/^\[INFO\]\s+Retomando a forja/i.test(part)) {
-        return 'Continuando de onde parou.';
-      }
-
-      if (/^\[INFO\]\s+.+? não entregou essa faixa/i.test(part)) {
-        return 'Essa fonte não entregou a faixa. Procurando outra.';
-      }
-
-      const metadataMatch = part.match(/^\[INFO\]\s+Metadados gravados:\s*(.+)$/i);
-      if (metadataMatch) return `Metadados gravados: ${metadataMatch[1]}`;
-
-      if (/^\[AVISO\]\s+Não consegui gravar os metadados/i.test(part)) {
-        return 'Faixa baixada, mas os metadados não foram gravados.';
-      }
-
-      const skippedMatch = part.match(/^\[AVISO\]\s+Faixa pulada:\s*(.+?)\.\s*Motivo:\s*(.+)$/i);
-      if (skippedMatch) return `Faixa não encontrada: ${skippedMatch[1]} (${skippedMatch[2]})`;
-
-      const youtubeSkippedMatch = part.match(/^\[AVISO\]\s+Item\s+(\d+)\s+não foi baixado/i);
-      if (youtubeSkippedMatch) return `Faixa ${youtubeSkippedMatch[1]} não foi baixada. Seguindo a sequência.`;
-
-      const playlistKindMatch = part.match(/^\[INFO\]\s+(.+?) detectado\. Mantendo o link como playlist\./i);
-      if (playlistKindMatch) return `${playlistKindMatch[1]} detectado. Sequência preservada.`;
-
-      const countMatch = part.match(/^\[INFO\]\s+(\d+)\s+itens encontrados na lista\./i);
-      if (countMatch) return `${countMatch[1]} faixas encontradas na sequência.`;
-
-      if (/^\[INFO\]\s+Não foi possível contar os itens/i.test(part)) {
-        return 'Sequência detectada. Contagem será atualizada durante a forja.';
-      }
-
-      const toolMatch = part.match(/^\[INFO\]\s+Baixando yt-dlp\.\.\.\s*(\d+)%/i);
-      if (toolMatch) return liveLog(`Preparando ferramentas: ${toolMatch[1]}%.`, 'tool-download');
-
-      const itemMatch = part.match(/Downloading item (\d+) of (\d+)/i);
-      if (itemMatch) return `Forjando faixa ${itemMatch[1]} de ${itemMatch[2]}.`;
-
-      if (/Writing video thumbnail/i.test(part)) {
-        return liveLog('Preparando capa da faixa.', 'thumbnail');
-      }
-
-      if (/^\[ThumbnailsConvertor\]\s+Converting thumbnail/i.test(part)) {
-        return liveLog('Convertendo capa para o MP3.', 'thumbnail');
-      }
-
-      if (/Deleting original file/i.test(part)) {
-        return liveLog('Limpando arquivos temporários.', 'cleanup');
-      }
-
-      const extractMatch = part.match(/^\[ExtractAudio\]\s+Destination:\s*(.+)$/i);
-      if (extractMatch) return `Áudio finalizado: ${filenameFromPath(extractMatch[1])}.`;
-
-      const destinationMatch = part.match(/Destination:\s*(.+)$/i);
-      if (destinationMatch) return `Arquivo preparado: ${filenameFromPath(destinationMatch[1])}.`;
-
-      const finishedMatch = part.match(/Finished downloading playlist:\s*(.+)$/i);
-      if (finishedMatch) return `Sequência concluída: ${finishedMatch[1]}.`;
-
-      const normalized = stripLogPrefix(part);
-      return normalized || null;
-    })
-    .filter(Boolean);
-};
-
-const appendReportLines = (setLogs, entries) => {
-  if (!entries.length) return;
-  setLogs((prev) => {
-    const next = [...prev];
-    entries.forEach((entry) => {
-      if (entry?.key) {
-        const existingIndex = next.findIndex((item) => item?.key === entry.key);
-        if (existingIndex !== -1) next.splice(existingIndex, 1);
-        next.push(entry);
-        return;
-      }
-
-      if (getLogText(next[next.length - 1]) !== entry) next.push(entry);
-    });
-    return next.slice(-40);
-  });
-};
-
-const upsertTrack = (items, track) => {
-  if (!track) return items;
-  const next = items.filter((item) => item.index !== track.index);
-  next.push(track);
-  return next.sort((a, b) => Number(a.index || 0) - Number(b.index || 0));
-};
-
-const formatTrackArtists = (track) => (
-  Array.isArray(track?.artists) && track.artists.length ? track.artists.join(', ') : ''
-);
+import { QUALITY_OPTIONS, SOURCE_OPTIONS, TRACK_FILTERS, formatTrackArtists, getLogText } from './lib/formatters';
+import SettingsDrawer from './components/SettingsDrawer';
+import { useDownload } from './hooks/useDownload';
+import { useSpotify } from './hooks/useSpotify';
 
 export default function App() {
+  // UI state (local ao componente)
   const [url, setUrl] = useState('');
   const [outputDir, setOutputDir] = useState('');
   const [quality, setQuality] = useState('5');
   const [source, setSource] = useState('youtube');
-  const [spotifyToken, setSpotifyToken] = useState('');
-  const [spotifyClientId, setSpotifyClientId] = useState('');
-  const [spotifyRedirectUri, setSpotifyRedirectUri] = useState('');
-  const [spotifyLoginUrl, setSpotifyLoginUrl] = useState('');
-  const [hasDefaultSpotifyClientId, setHasDefaultSpotifyClientId] = useState(false);
-  const [tokenSaveState, setTokenSaveState] = useState('');
-  const [spotifyTestState, setSpotifyTestState] = useState('');
-  const [redirectCopyState, setRedirectCopyState] = useState('');
-  const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
-  const [showQualitySettings, setShowQualitySettings] = useState(false);
-  const [hasSavedSpotifyToken, setHasSavedSpotifyToken] = useState(false);
-  const [hasSpotifyAuth, setHasSpotifyAuth] = useState(false);
-  const [appVersion, setAppVersion] = useState('');
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [spotifyPlaylistUrl, setSpotifyPlaylistUrl] = useState('');
-  const [spotifyPreview, setSpotifyPreview] = useState(null);
-  const [isPreviewing, setIsPreviewing] = useState(false);
-  const [previewError, setPreviewError] = useState('');
-  const [isDownloading, setIsDownloading] = useState(false);
-  const [pauseState, setPauseState] = useState('idle');
-  const [logs, setLogs] = useState([]);
-  const [downloadedTracks, setDownloadedTracks] = useState([]);
-  const [skippedTracks, setSkippedTracks] = useState([]);
   const [trackFilter, setTrackFilter] = useState('all');
   const [denseResults, setDenseResults] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isSettingsClosing, setIsSettingsClosing] = useState(false);
+  const [isCompact, setIsCompact] = useState(false);
   const [readyUpdate, setReadyUpdate] = useState(null);
   const [toolsStatus, setToolsStatus] = useState(null);
+  const [appVersion, setAppVersion] = useState('');
   const [status, setStatus] = useState('Aguardando um link.');
-  const [progress, setProgress] = useState({
-    percent: 0,
-    speed: '',
-    eta: '',
-    title: '',
-    itemIndex: null,
-    itemCount: null
-  });
-  const [isCompact, setIsCompact] = useState(false);
   const logBoxRef = useRef(null);
-  const isDownloadingRef = useRef(false);
 
+  // Custom hooks
+  const {
+    isDownloading, isDownloadingRef, pauseState,
+    logs, downloadedTracks, skippedTracks, progress,
+    startDownload, handlePauseToggle, subscribeDownloadEvents
+  } = useDownload({ setStatus });
+
+  const {
+    spotifyToken, setSpotifyToken,
+    spotifyClientId, setSpotifyClientId,
+    spotifyRedirectUri,
+    spotifyLoginUrl,
+    hasDefaultSpotifyClientId,
+    tokenSaveState, setTokenSaveState,
+    spotifyTestState,
+    redirectCopyState,
+    hasSavedSpotifyToken,
+    hasSpotifyAuth,
+    spotifyPlaylistUrl, setSpotifyPlaylistUrl,
+    spotifyPreview, setSpotifyPreview, isPreviewing, previewError,
+    loadSpotifySettings, subscribeSpotifyEvents,
+    handleSaveSpotifyToken, handleSaveSpotifyClientId,
+    handleConnectSpotify, handleOpenSpotifyLoginUrl,
+    handleCopyRedirectUri, handleTestSpotifyConnection,
+    handleDisconnectSpotify, handleClearSpotifyToken,
+    handleSpotifyPreview
+  } = useSpotify({ setStatus });
+
+  // IPC setup
+  useEffect(() => {
+    if (!window.soundforge) return;
+
+    window.soundforge.getSettings?.().then((settings) => {
+      if (settings?.appVersion) setAppVersion(settings.appVersion);
+      loadSpotifySettings(settings);
+    }).catch(() => {});
+
+    const applyToolsStatus = (tools) => {
+      if (!tools?.message) return;
+      setToolsStatus(tools);
+      setStatus((current) => {
+        if (isDownloadingRef.current || current.includes('forjada') || current.includes('Download')) return current;
+        return tools.message;
+      });
+    };
+    window.soundforge.getToolsStatus?.().then(applyToolsStatus).catch(() => {});
+    const unsubToolsStatus = window.soundforge.onToolsStatus?.(applyToolsStatus);
+
+    const unsubUpdate = window.soundforge.onUpdateDownloaded?.((info) => {
+      setReadyUpdate(info || {});
+      setStatus(`Atualização ${info?.version || ''} pronta para instalar.`.trim());
+    });
+
+    const unsubDownload = subscribeDownloadEvents();
+    const unsubSpotify = subscribeSpotifyEvents();
+
+    return () => {
+      unsubToolsStatus?.();
+      unsubUpdate?.();
+      unsubDownload?.();
+      unsubSpotify?.();
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!logBoxRef.current) return;
+    logBoxRef.current.scrollTop = logBoxRef.current.scrollHeight;
+  }, [logs]);
+
+  useEffect(() => {
+    const updateCompact = () => setIsCompact(window.innerWidth <= 560);
+    updateCompact();
+    window.addEventListener('resize', updateCompact);
+    return () => window.removeEventListener('resize', updateCompact);
+  }, []);
+
+  useEffect(() => {
+    setSpotifyPreview(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source, spotifyPlaylistUrl, spotifyToken, hasSpotifyAuth]);
+
+  useEffect(() => {
+    if (!isSettingsOpen) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    const previousPaddingRight = document.body.style.paddingRight;
+    const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
+    document.body.style.overflow = 'hidden';
+    if (scrollbarWidth > 0) document.body.style.paddingRight = `${scrollbarWidth}px`;
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.body.style.paddingRight = previousPaddingRight;
+    };
+  }, [isSettingsOpen]);
+
+  // Computed values
   const isReady = useMemo(() => {
-    if (source === 'spotify') {
-      return (
-        spotifyPlaylistUrl.trim().length > 0 &&
-        outputDir.trim().length > 0
-      );
-    }
+    if (source === 'spotify') return spotifyPlaylistUrl.trim().length > 0 && outputDir.trim().length > 0;
     return url.trim().length > 0 && outputDir.trim().length > 0;
   }, [source, spotifyPlaylistUrl, url, outputDir]);
+
   const progressPercent = Number.isFinite(progress.percent) ? Math.min(100, Math.max(0, progress.percent)) : 0;
   const progressLabel = `${progressPercent.toFixed(1)}%`;
   const trackLabel = progress.title || (isDownloading ? 'Invocando faixa...' : 'Nenhuma faixa em execução');
-  const playlistLabel =
-    progress.itemIndex && progress.itemCount ? `Faixa ${progress.itemIndex} de ${progress.itemCount}` : null;
+  const playlistLabel = progress.itemIndex && progress.itemCount ? `Faixa ${progress.itemIndex} de ${progress.itemCount}` : null;
   const latestReportLine = useMemo(() => {
     const lastEntry = [...logs].reverse().find((entry) => getLogText(entry).trim());
     return getLogText(lastEntry).trim();
@@ -258,182 +144,20 @@ export default function App() {
   const pauseButtonHint = pauseState === 'paused' ? 'Retomar de onde parou' : 'Para após a faixa atual';
   const canConnectSpotify = hasDefaultSpotifyClientId || spotifyClientId.trim().length > 0;
   const selectedQualityLabel = QUALITY_OPTIONS.find((option) => option.value === quality)?.label || 'Média';
-  const spotifyStatusText = hasSpotifyAuth
-    ? 'Conta Spotify conectada'
-    : hasSavedSpotifyToken
-      ? 'Token manual salvo neste computador'
-      : 'Spotify não conectado';
-  const spotifyAuthLabel = hasSpotifyAuth
-    ? 'Sessão automática'
-    : hasSavedSpotifyToken
-      ? 'Token manual'
-      : hasDefaultSpotifyClientId
-        ? 'Login pronto para conectar'
-        : 'Aguardando configuração';
+  const spotifyStatusText = hasSpotifyAuth ? 'Conta Spotify conectada' : hasSavedSpotifyToken ? 'Token manual salvo neste computador' : 'Spotify não conectado';
+  const spotifyAuthLabel = hasSpotifyAuth ? 'Sessão automática' : hasSavedSpotifyToken ? 'Token manual' : hasDefaultSpotifyClientId ? 'Login pronto para conectar' : 'Aguardando configuração';
   const toolRows = [
-    {
-      label: 'yt-dlp',
-      ready: Boolean(toolsStatus?.ytDlpReady),
-      description: toolsStatus?.ytDlpReady ? 'Pronto para baixar.' : 'Será preparado automaticamente.'
-    },
-    {
-      label: 'ffmpeg',
-      ready: Boolean(toolsStatus?.ffmpegReady),
-      description: toolsStatus?.ffmpegReady ? 'Pronto para converter e gravar metadados.' : 'Não encontrado no pacote/local.'
-    },
-    {
-      label: 'ffprobe',
-      ready: Boolean(toolsStatus?.ffmpegReady),
-      description: toolsStatus?.ffmpegReady ? 'Pronto para validar áudio final.' : 'Usa a mesma pasta do ffmpeg.'
-    }
+    { label: 'yt-dlp', ready: Boolean(toolsStatus?.ytDlpReady), description: toolsStatus?.ytDlpReady ? 'Pronto para baixar.' : 'Será preparado automaticamente.' },
+    { label: 'ffmpeg', ready: Boolean(toolsStatus?.ffmpegReady), description: toolsStatus?.ffmpegReady ? 'Pronto para converter e gravar metadados.' : 'Não encontrado no pacote/local.' },
+    { label: 'ffprobe', ready: Boolean(toolsStatus?.ffmpegReady), description: toolsStatus?.ffmpegReady ? 'Pronto para validar áudio final.' : 'Usa a mesma pasta do ffmpeg.' }
   ];
   const getTrackFilterCount = (filter) => {
     if (filter === 'downloaded') return downloadedTracks.length;
     if (filter === 'missing' || filter === 'error') return skippedTracks.length;
     return downloadedTracks.length + skippedTracks.length;
   };
-  useEffect(() => {
-    isDownloadingRef.current = isDownloading;
-  }, [isDownloading]);
 
-  useEffect(() => {
-    if (!window.soundforge) return;
-
-    window.soundforge.getSettings?.().then((settings) => {
-      if (settings?.appVersion) setAppVersion(settings.appVersion);
-      if (settings?.spotifyClientId) setSpotifyClientId(settings.spotifyClientId);
-      if (settings?.spotifyRedirectUri) setSpotifyRedirectUri(settings.spotifyRedirectUri);
-      setHasDefaultSpotifyClientId(Boolean(settings?.hasDefaultSpotifyClientId));
-      if (settings?.hasSpotifyAuth) {
-        setHasSpotifyAuth(true);
-        setTokenSaveState('Spotify conectado neste computador.');
-      }
-      if (settings?.spotifyToken) {
-        setSpotifyToken(settings.spotifyToken);
-        setHasSavedSpotifyToken(true);
-        if (!settings?.hasSpotifyAuth) setTokenSaveState('Token carregado deste computador.');
-      }
-    }).catch(() => {});
-
-    window.soundforge.onLog((line) => {
-      appendReportLines(setLogs, formatReportLine(line));
-    });
-
-    const applyToolsStatus = (tools) => {
-      if (!tools?.message) return;
-      setToolsStatus(tools);
-      setStatus((current) => {
-        if (isDownloadingRef.current || current.includes('forjada') || current.includes('Download')) return current;
-        return tools.message;
-      });
-    };
-
-    window.soundforge.getToolsStatus?.().then(applyToolsStatus).catch(() => {});
-    window.soundforge.onToolsStatus?.(applyToolsStatus);
-
-    window.soundforge.onProgress((data) => {
-      setProgress(data);
-    });
-
-    window.soundforge.onPauseState?.(({ state }) => {
-      setPauseState(state || 'idle');
-      if (state === 'pausing') setStatus('Pausando após a faixa atual.');
-      if (state === 'paused') setStatus('Download pausado.');
-      if (state === 'running') setStatus('Forja em andamento.');
-    });
-
-    window.soundforge.onTrackComplete((track) => {
-      setDownloadedTracks((prev) => upsertTrack(prev, track));
-    });
-
-    window.soundforge.onTrackSkipped((track) => {
-      setSkippedTracks((prev) => upsertTrack(prev, track));
-    });
-
-    window.soundforge.onComplete(({ isPlaylist, downloadedTracks = [], skippedTracks = [] }) => {
-      const completed = Array.isArray(downloadedTracks) ? downloadedTracks : [];
-      const skipped = Array.isArray(skippedTracks) ? skippedTracks : [];
-      const skippedCount = skipped.length;
-      const completeMessage = isPlaylist
-        ? skippedCount
-          ? `Download da playlist concluído com ${skippedCount} faixa(s) não baixada(s).`
-          : 'Download da playlist concluído.'
-        : 'Download concluído.';
-      setIsDownloading(false);
-      setPauseState('idle');
-      setStatus(skippedCount ? 'Playlist forjada com pendências.' : isPlaylist ? 'Playlist forjada com sucesso.' : 'Música forjada com sucesso.');
-      setLogs([completeMessage]);
-      setDownloadedTracks(completed);
-      setSkippedTracks(skipped);
-      setProgress({
-        percent: 0,
-        speed: '',
-        eta: '',
-        title: completeMessage,
-        itemIndex: null,
-        itemCount: null
-      });
-    });
-
-    window.soundforge.onError((message) => {
-      setIsDownloading(false);
-      setPauseState('idle');
-      setStatus(message || 'Falha no download.');
-      appendReportLines(setLogs, [`Falha na forja: ${message || 'download interrompido.'}`]);
-    });
-
-    window.soundforge.onSpotifyAuthComplete?.((result) => {
-      if (result?.connected) {
-        setHasSpotifyAuth(true);
-        setSpotifyLoginUrl('');
-        setTokenSaveState('Spotify conectado. O Soundforge renovará a sessão automaticamente.');
-        return;
-      }
-      setTokenSaveState(result?.error || 'Não consegui concluir o login Spotify.');
-    });
-
-    window.soundforge.onUpdateDownloaded?.((info) => {
-      setReadyUpdate(info || {});
-      setStatus(`Atualização ${info?.version || ''} pronta para instalar.`.trim());
-    });
-  }, []);
-
-  useEffect(() => {
-    if (!logBoxRef.current) return;
-    logBoxRef.current.scrollTop = logBoxRef.current.scrollHeight;
-  }, [logs]);
-
-  useEffect(() => {
-    const updateCompact = () => {
-      setIsCompact(window.innerWidth <= 560);
-    };
-    updateCompact();
-    window.addEventListener('resize', updateCompact);
-    return () => window.removeEventListener('resize', updateCompact);
-  }, []);
-
-  useEffect(() => {
-    setSpotifyPreview(null);
-    setPreviewError('');
-  }, [source, spotifyPlaylistUrl, spotifyToken, hasSpotifyAuth]);
-
-  useEffect(() => {
-    if (!isSettingsOpen) return undefined;
-
-    const previousOverflow = document.body.style.overflow;
-    const previousPaddingRight = document.body.style.paddingRight;
-    const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
-    document.body.style.overflow = 'hidden';
-    if (scrollbarWidth > 0) {
-      document.body.style.paddingRight = `${scrollbarWidth}px`;
-    }
-
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      document.body.style.paddingRight = previousPaddingRight;
-    };
-  }, [isSettingsOpen]);
-
+  // Handlers locais
   const handleSelectFolder = async () => {
     if (!window.soundforge) return;
     const selected = await window.soundforge.selectOutputDir();
@@ -442,23 +166,7 @@ export default function App() {
 
   const handleDownload = () => {
     if (!window.soundforge || !isReady || isDownloading) return;
-
-    setLogs([]);
-    setDownloadedTracks([]);
-    setSkippedTracks([]);
-    setStatus('Invocando a forja...');
-    setIsDownloading(true);
-    setPauseState('running');
-    setProgress({
-      percent: 0,
-      speed: '',
-      eta: '',
-      title: '',
-      itemIndex: null,
-      itemCount: null
-    });
-
-    window.soundforge.startDownload({
+    startDownload({
       source,
       url: url.trim(),
       spotifyToken: spotifyToken.trim(),
@@ -468,152 +176,36 @@ export default function App() {
     });
   };
 
-  const handleRestartAndInstall = () => {
-    if (!window.soundforge?.restartAndInstallUpdate) return;
-    window.soundforge.restartAndInstallUpdate();
-  };
-
-  const handlePauseToggle = async () => {
-    if (!window.soundforge || !isDownloading) return;
-    if (pauseState === 'paused') {
-      setPauseState('running');
-      await window.soundforge.resumeDownload?.();
-      return;
-    }
-
-    setPauseState('pausing');
-    await window.soundforge.pauseDownload?.();
-  };
-
-  const handleSaveSpotifyToken = async () => {
-    if (!window.soundforge?.saveSpotifyToken || !spotifyToken.trim()) return;
-    setTokenSaveState('Salvando token...');
-    try {
-      await window.soundforge.saveSpotifyToken(spotifyToken.trim());
-      setHasSavedSpotifyToken(true);
-      setTokenSaveState('Token salvo neste computador.');
-    } catch {
-      setTokenSaveState('Não consegui salvar o token.');
-    }
-  };
-
-  const handleSaveSpotifyClientId = async () => {
-    if (!window.soundforge?.saveSpotifyClientId || !spotifyClientId.trim()) return;
-    setTokenSaveState('Salvando Client ID...');
-    try {
-      await window.soundforge.saveSpotifyClientId(spotifyClientId.trim());
-      setTokenSaveState('Client ID salvo. Você já pode conectar o Spotify.');
-    } catch {
-      setTokenSaveState('Não consegui salvar o Client ID.');
-    }
-  };
-
-  const handleConnectSpotify = async () => {
-    if (!window.soundforge?.startSpotifyLogin || isDownloading) return;
-    setTokenSaveState('Gerando link de login do Spotify...');
-    try {
-      const result = await window.soundforge.startSpotifyLogin(spotifyClientId.trim());
-      setSpotifyLoginUrl(result?.authUrl || '');
-      if (result?.authUrl) {
-        await window.soundforge.openExternal?.(result.authUrl);
-      }
-      setTokenSaveState('Login aberto no navegador. Se não abrir, use o botão de login abaixo.');
-    } catch (err) {
-      setTokenSaveState(err?.message || 'Não consegui conectar o Spotify.');
-    }
-  };
-
-  const handleOpenSpotifyLoginUrl = async () => {
-    if (!spotifyLoginUrl || !window.soundforge?.openExternal) return;
-    await window.soundforge.openExternal(spotifyLoginUrl);
-  };
-
-  const handleCopyRedirectUri = async () => {
-    if (!spotifyRedirectUri) return;
-    setRedirectCopyState('Copiando...');
-    try {
-      if (window.soundforge?.copyText) {
-        await window.soundforge.copyText(spotifyRedirectUri);
-      } else {
-        await navigator.clipboard.writeText(spotifyRedirectUri);
-      }
-      setRedirectCopyState('Redirect URI copiado.');
-    } catch {
-      setRedirectCopyState('Não consegui copiar automaticamente.');
-    }
-  };
-
-  const handleTestSpotifyConnection = async () => {
-    if (!window.soundforge?.testSpotifyConnection) return;
-    setSpotifyTestState('Testando conexão...');
-    try {
-      const result = await window.soundforge.testSpotifyConnection(spotifyToken.trim());
-      setSpotifyTestState(result?.name ? `Conexão OK: ${result.name}.` : 'Conexão Spotify OK.');
-      setHasSpotifyAuth((current) => current || Boolean(result?.ok && !spotifyToken.trim()));
-    } catch (err) {
-      setSpotifyTestState(err?.message || 'Não consegui validar o Spotify agora.');
-    }
-  };
-
   const handleRefreshToolsStatus = async () => {
     if (!window.soundforge?.getToolsStatus) return;
     try {
       const tools = await window.soundforge.getToolsStatus();
       setToolsStatus(tools);
     } catch {
-      setToolsStatus((current) => current || {
-        state: 'error',
-        ytDlpReady: false,
-        ffmpegReady: false,
-        message: 'Não consegui ler o status das ferramentas.'
-      });
+      setToolsStatus((current) => current || { state: 'error', ytDlpReady: false, ffmpegReady: false, message: 'Não consegui ler o status das ferramentas.' });
     }
   };
 
-  const handleDisconnectSpotify = async () => {
-    if (!window.soundforge?.disconnectSpotify || isDownloading) return;
-    setTokenSaveState('Desconectando Spotify...');
-    try {
-      await window.soundforge.disconnectSpotify();
-      setHasSpotifyAuth(false);
-      setTokenSaveState('Spotify desconectado deste computador.');
-    } catch {
-      setTokenSaveState('Não consegui desconectar o Spotify.');
-    }
+  const handleRestartAndInstall = () => {
+    if (!window.soundforge?.restartAndInstallUpdate) return;
+    window.soundforge.restartAndInstallUpdate();
   };
 
-  const handleClearSpotifyToken = async () => {
-    if (!window.soundforge?.clearSpotifyToken) return;
-    setTokenSaveState('Removendo token...');
-    try {
-      await window.soundforge.clearSpotifyToken();
-      setSpotifyToken('');
-      setHasSavedSpotifyToken(false);
-      setTokenSaveState('Token removido deste computador.');
-    } catch {
-      setTokenSaveState('Não consegui remover o token.');
-    }
+  const handleOpenSettings = () => {
+    setIsSettingsClosing(false);
+    setIsSettingsOpen(true);
   };
 
-  const handleSpotifyPreview = async () => {
-    if (!window.soundforge || isPreviewing || isDownloading) return;
-    if (!spotifyPlaylistUrl.trim()) return;
-    setPreviewError('');
-    setIsPreviewing(true);
-    try {
-      const data = await window.soundforge.getSpotifyPreview({
-        spotifyToken: spotifyToken.trim(),
-        spotifyPlaylistUrl: spotifyPlaylistUrl.trim()
-      });
-      setSpotifyPreview(data);
-    } catch (err) {
-      setSpotifyPreview(null);
-      setPreviewError(err?.message || 'Falha ao buscar prévia da playlist.');
-    } finally {
-      setIsPreviewing(false);
-    }
+  const handleCloseSettings = () => {
+    if (isSettingsClosing) return;
+    setIsSettingsClosing(true);
+    window.setTimeout(() => {
+      setIsSettingsOpen(false);
+      setIsSettingsClosing(false);
+    }, 240);
   };
 
+  // Render
   return (
     <div className={`app ${isCompact ? 'compact' : ''}`}>
       <nav className="topbar" aria-label="Navegação principal">
@@ -625,7 +217,7 @@ export default function App() {
             <span className="topbar-subtitle">Baixe canções do reino do YouTube com qualidade à sua escolha.</span>
           </span>
         </div>
-        <button className="icon-button" type="button" onClick={() => setIsSettingsOpen(true)} aria-label="Abrir configurações">
+        <button className="icon-button" type="button" onClick={handleOpenSettings} aria-label="Abrir configurações">
           <FiSettings />
         </button>
       </nav>
@@ -636,39 +228,22 @@ export default function App() {
           <div className="select-row">
             {SOURCE_OPTIONS.map((option) => (
               <label key={option.value} className={`radio ${source === option.value ? 'active' : ''}`}>
-                <input
-                  type="radio"
-                  name="source"
-                  value={option.value}
-                  checked={source === option.value}
-                  onChange={() => setSource(option.value)}
-                />
+                <input type="radio" name="source" value={option.value} checked={source === option.value} onChange={() => setSource(option.value)} />
                 <span>{option.label}</span>
               </label>
             ))}
           </div>
-          {showSpotifyPublicNotice && (
-            <p className="source-notice subtle">Sem login, o Soundforge tenta ler apenas a prévia pública da playlist.</p>
-          )}
-          {showSubtleSpotifyNotice && (
-            <p className="source-notice subtle">Spotify ainda não conectado neste computador.</p>
-          )}
+          {showSpotifyPublicNotice && <p className="source-notice subtle">Sem login, o Soundforge tenta ler apenas a prévia pública da playlist.</p>}
+          {showSubtleSpotifyNotice && <p className="source-notice subtle">Spotify ainda não conectado neste computador.</p>}
         </div>
 
         <div className="control-field control-field-wide">
-          {source === 'youtube' ? (
-            <label className="label link-label">Link do YouTube</label>
-          ) : (
-            <label className="label link-label">Link da playlist do Spotify</label>
-          )}
+          {source === 'youtube' ? <label className="label link-label">Link do YouTube</label> : <label className="label link-label">Link da playlist do Spotify</label>}
           <input
             className="input"
             placeholder={source === 'youtube' ? 'Cole aqui o link da música ou playlist' : 'Cole aqui o link da playlist do Spotify'}
             value={source === 'youtube' ? url : spotifyPlaylistUrl}
-            onChange={(event) => {
-              if (source === 'youtube') setUrl(event.target.value);
-              else setSpotifyPlaylistUrl(event.target.value);
-            }}
+            onChange={(event) => { if (source === 'youtube') setUrl(event.target.value); else setSpotifyPlaylistUrl(event.target.value); }}
           />
         </div>
 
@@ -676,27 +251,15 @@ export default function App() {
           <>
             <div className="preview-row">
               {!hasSpotifyAuth && (
-                <button
-                  className="button update"
-                  type="button"
-                  onClick={canConnectSpotify ? handleConnectSpotify : () => setIsSettingsOpen(true)}
-                  disabled={isDownloading}
-                >
+                <button className="button update" type="button" onClick={canConnectSpotify ? handleConnectSpotify : handleOpenSettings} disabled={isDownloading}>
                   Conectar Spotify
                 </button>
               )}
-              <button
-                className="button ghost"
-                type="button"
-                onClick={handleSpotifyPreview}
-                disabled={!spotifyPlaylistUrl.trim() || isPreviewing || isDownloading}
-              >
+              <button className="button ghost" type="button" onClick={handleSpotifyPreview} disabled={!spotifyPlaylistUrl.trim() || isPreviewing || isDownloading}>
                 {isPreviewing ? 'Carregando prévia...' : 'Ver prévia da playlist'}
               </button>
               {spotifyLoginUrl && !hasSpotifyAuth && (
-                <button className="button ghost" type="button" onClick={handleOpenSpotifyLoginUrl}>
-                  Abrir login no Spotify
-                </button>
+                <button className="button ghost" type="button" onClick={handleOpenSpotifyLoginUrl}>Abrir login no Spotify</button>
               )}
               {previewError && <span className="helper error">{previewError}</span>}
             </div>
@@ -704,9 +267,7 @@ export default function App() {
               <div className="preview-box">
                 <div className="preview-header">
                   <h3>{spotifyPreview.name || 'Playlist do Spotify'}</h3>
-                  <span>
-                    {spotifyPreview.total ? `${spotifyPreview.total} faixas` : `${spotifyPreview.tracks.length} faixas`}
-                  </span>
+                  <span>{spotifyPreview.total ? `${spotifyPreview.total} faixas` : `${spotifyPreview.tracks.length} faixas`}</span>
                 </div>
                 <div className="preview-list">
                   {spotifyPreview.tracks.map((track, index) => (
@@ -718,9 +279,7 @@ export default function App() {
                   ))}
                 </div>
                 {spotifyPreview.total && spotifyPreview.total > spotifyPreview.tracks.length && (
-                  <p className="helper">
-                    Mostrando {spotifyPreview.tracks.length} de {spotifyPreview.total} faixas.
-                  </p>
+                  <p className="helper">Mostrando {spotifyPreview.tracks.length} de {spotifyPreview.total} faixas.</p>
                 )}
               </div>
             )}
@@ -734,13 +293,7 @@ export default function App() {
             <div className="select-row">
               {QUALITY_OPTIONS.map((option) => (
                 <label key={option.value} className={`radio quality-option ${quality === option.value ? 'active' : ''}`}>
-                  <input
-                    type="radio"
-                    name="quality"
-                    value={option.value}
-                    checked={quality === option.value}
-                    onChange={() => setQuality(option.value)}
-                  />
+                  <input type="radio" name="quality" value={option.value} checked={quality === option.value} onChange={() => setQuality(option.value)} />
                   <span className="quality-copy">
                     <span className="quality-label">{option.label}</span>
                     <span className="quality-detail">{option.detail}</span>
@@ -752,38 +305,22 @@ export default function App() {
           <div className="destination-block">
             <label className="label">Pasta de destino</label>
             <div className="folder-row">
-              <button className="button ghost" type="button" onClick={handleSelectFolder}>
-                Escolher pasta
-              </button>
+              <button className="button ghost" type="button" onClick={handleSelectFolder}>Escolher pasta</button>
               <span className="folder-path">{outputDir || 'Nenhuma pasta escolhida'}</span>
             </div>
           </div>
         </div>
 
         <div className="actions control-actions">
-          <button
-            className="button primary"
-            type="button"
-            onClick={handleDownload}
-            disabled={!isReady || isDownloading || isPreviewing}
-          >
-            <span className={`button-icon ${isDownloading ? 'loading' : ''}`} aria-hidden="true">
-              {isDownloading ? '' : '↓'}
-            </span>
+          <button className="button primary" type="button" onClick={handleDownload} disabled={!isReady || isDownloading || isPreviewing}>
+            <span className={`button-icon ${isDownloading ? 'loading' : ''}`} aria-hidden="true">{isDownloading ? '' : '↓'}</span>
             <span className="button-content">
               <span className="button-title">{isDownloading ? 'Forjando...' : 'Iniciar download'}</span>
-              <span className="button-subtitle">
-                {isDownloading ? 'Mantendo o ritual em execução' : 'MP3 com qualidade escolhida'}
-              </span>
+              <span className="button-subtitle">{isDownloading ? 'Mantendo o ritual em execução' : 'MP3 com qualidade escolhida'}</span>
             </span>
           </button>
           {isDownloading && (
-            <button
-              className={`button pause ${pauseState === 'paused' ? 'paused' : ''}`}
-              type="button"
-              onClick={handlePauseToggle}
-              disabled={pauseState === 'pausing'}
-            >
+            <button className={`button pause ${pauseState === 'paused' ? 'paused' : ''}`} type="button" onClick={handlePauseToggle} disabled={pauseState === 'pausing'}>
               <span className="button-title">{pauseButtonLabel}</span>
               <span className="button-subtitle">{pauseButtonHint}</span>
             </button>
@@ -793,9 +330,7 @@ export default function App() {
             <span>{status}</span>
           </div>
           {readyUpdate && (
-            <button className="button update" type="button" onClick={handleRestartAndInstall}>
-              Reiniciar e instalar
-            </button>
+            <button className="button update" type="button" onClick={handleRestartAndInstall}>Reiniciar e instalar</button>
           )}
         </div>
       </section>
@@ -824,17 +359,13 @@ export default function App() {
           </section>
 
           <section className="panel logs">
-            <div className="logs-header">
-              <h2>Relatório da forja</h2>
-            </div>
+            <div className="logs-header"><h2>Relatório da forja</h2></div>
             <div className="log-box" ref={logBoxRef}>
               {logs.length === 0 ? (
                 <p className="log-empty">Nenhuma mensagem ainda.</p>
               ) : (
                 logs.map((line, index) => (
-                  <div key={`${getLogText(line)}-${index}`} className="log-line">
-                    {getLogText(line)}
-                  </div>
+                  <div key={`${getLogText(line)}-${index}`} className="log-line">{getLogText(line)}</div>
                 ))
               )}
             </div>
@@ -845,80 +376,71 @@ export default function App() {
           <div className="track-toolbar">
             <div className="track-filters" aria-label="Filtrar músicas">
               {TRACK_FILTERS.map((filter) => (
-                <button
-                  key={filter.value}
-                  className={`track-filter ${trackFilter === filter.value ? 'active' : ''}`}
-                  type="button"
-                  onClick={() => setTrackFilter(filter.value)}
-                >
+                <button key={filter.value} className={`track-filter ${trackFilter === filter.value ? 'active' : ''}`} type="button" onClick={() => setTrackFilter(filter.value)}>
                   <span>{filter.label}</span>
                   <span className="track-filter-count">{getTrackFilterCount(filter.value)}</span>
                 </button>
               ))}
             </div>
-            <button
-              className={`track-density-toggle ${denseResults ? 'active' : ''}`}
-              type="button"
-              onClick={() => setDenseResults((value) => !value)}
-              aria-pressed={denseResults}
-            >
+            <button className={`track-density-toggle ${denseResults ? 'active' : ''}`} type="button" onClick={() => setDenseResults((v) => !v)} aria-pressed={denseResults}>
               Compacto
             </button>
           </div>
+
           {showDownloadedResults && (
-          <section className="panel track-results">
-            <div className="logs-header">
-              <h2>Músicas baixadas</h2>
-              <span className="progress-pill">{downloadedTracks.length}</span>
-            </div>
-            <div className="track-list success-list">
-              {downloadedTracks.length === 0 ? (
-                <p className="log-empty">As músicas concluídas aparecerão aqui durante a playlist.</p>
-              ) : (
-                downloadedTracks.map((track) => {
-                  const artists = formatTrackArtists(track);
-                  return (
-                    <div key={`downloaded-${track.index}-${track.name}`} className="track-result success">
-                      <span className="track-result-index">{String(track.index).padStart(2, '0')}</span>
-                      <span className="track-result-main">
-                        <span className="track-result-title">{track.name}</span>
-                        {artists && <span className="track-result-meta">{artists}</span>}
-                        <span className="track-result-source">Fonte: {track.source || 'encontrada'}</span>
-                      </span>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          </section>
+            <section className="panel track-results">
+              <div className="logs-header">
+                <h2>Músicas baixadas</h2>
+                <span className="progress-pill">{downloadedTracks.length}</span>
+              </div>
+              <div className="track-list success-list">
+                {downloadedTracks.length === 0 ? (
+                  <p className="log-empty">As músicas concluídas aparecerão aqui durante a playlist.</p>
+                ) : (
+                  downloadedTracks.map((track) => {
+                    const artists = formatTrackArtists(track);
+                    return (
+                      <div key={`downloaded-${track.index}-${track.name}`} className="track-result success">
+                        <span className="track-result-index">{String(track.index).padStart(2, '0')}</span>
+                        <span className="track-result-main">
+                          <span className="track-result-title">{track.name}</span>
+                          {artists && <span className="track-result-meta">{artists}</span>}
+                          <span className="track-result-source">Fonte: {track.source || 'encontrada'}</span>
+                        </span>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </section>
           )}
 
           {showSkippedResults && (
-          <section className="panel track-results">
-            <div className="logs-header">
-              <h2>{trackFilter === 'error' ? 'Com erro' : 'Músicas não baixadas'}</h2>
-              <span className="progress-pill">{skippedTracks.length}</span>
-            </div>
-            <div className="track-list missing-list">
-              {skippedTracks.length === 0 ? (
-                <p className="log-empty">As faixas que precisarem de revisão aparecerão aqui com o motivo.</p>
-              ) : (
-                skippedTracks.map((track) => {
-                  const artists = formatTrackArtists(track);
-                  return (
-                    <div key={`skipped-${track.index}-${track.name}`} className="track-result missing">
-                      <span className="track-result-index">{String(track.index).padStart(2, '0')}</span>
-                      <span className="track-result-main">
-                        <span className="track-result-title">{track.name}</span>
-                        {artists && <span className="track-result-meta">{artists}</span>}
-                        <span className="track-result-reason"><span aria-hidden="true">!</span>{track.reason || 'Nenhuma fonte retornou download válido.'}</span>
-                      </span>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          </section>
+            <section className="panel track-results">
+              <div className="logs-header">
+                <h2>{trackFilter === 'error' ? 'Com erro' : 'Músicas não baixadas'}</h2>
+                <span className="progress-pill">{skippedTracks.length}</span>
+              </div>
+              <div className="track-list missing-list">
+                {skippedTracks.length === 0 ? (
+                  <p className="log-empty">As faixas que precisarem de revisão aparecerão aqui com o motivo.</p>
+                ) : (
+                  skippedTracks.map((track) => {
+                    const artists = formatTrackArtists(track);
+                    return (
+                      <div key={`skipped-${track.index}-${track.name}`} className="track-result missing">
+                        <span className="track-result-index">{String(track.index).padStart(2, '0')}</span>
+                        <span className="track-result-main">
+                          <span className="track-result-title">{track.name}</span>
+                          {artists && <span className="track-result-meta">{artists}</span>}
+                          <span className="track-result-reason"><span aria-hidden="true">!</span>{track.reason || 'Nenhuma fonte retornou download válido.'}</span>
+                        </span>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </section>
           )}
         </div>
       </div>
@@ -928,269 +450,50 @@ export default function App() {
       </footer>
 
       {isSettingsOpen && (
-        <div className="settings-overlay" role="presentation" onClick={() => setIsSettingsOpen(false)}>
-          <aside
-            className="settings-drawer"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="settings-title"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="settings-header">
-              <div>
-                <p className="eyebrow">Preferências</p>
-                <h2 id="settings-title">Configurações</h2>
-              </div>
-              <button className="icon-button" type="button" onClick={() => setIsSettingsOpen(false)} aria-label="Fechar configurações">
-                <FiX />
-              </button>
-            </div>
-
-            <div className="settings-section">
-              <div className="settings-section-header">
-                <span className="settings-label">Geral</span>
-                <strong>Soundforge</strong>
-              </div>
-              <div className="settings-about">
-                <img className="settings-about-logo" src={logoSoundforge} alt="Soundforge" />
-                <div>
-                  <p>Forja sonora para baixar MP3 do YouTube e playlists do Spotify, com metadados e atualizações automáticas.</p>
-                  <div className="settings-summary-grid">
-                    <span>Fonte ativa</span>
-                    <strong>{source === 'spotify' ? 'Spotify' : 'YouTube'}</strong>
-                    <span>Visual das listas</span>
-                    <strong>{denseResults ? 'Compacto' : 'Confortável'}</strong>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="settings-section">
-              <div className="settings-section-header">
-                <span className="settings-label">Downloads</span>
-                <strong>Preferências atuais</strong>
-              </div>
-              <div className="settings-edit-list">
-                <div className="settings-edit-row">
-                  <div className="settings-edit-main">
-                    <span>Qualidade MP3</span>
-                    <strong>{selectedQualityLabel}</strong>
-                  </div>
-                  <button
-                    className={`button ghost icon-text-button settings-edit-button ${showQualitySettings ? 'saving' : ''}`}
-                    type="button"
-                    onClick={() => setShowQualitySettings((value) => !value)}
-                  >
-                    {showQualitySettings ? <FiCheck aria-hidden="true" /> : <FiEdit2 aria-hidden="true" />}
-                    {showQualitySettings ? 'Salvar' : 'Editar'}
-                  </button>
-                </div>
-                {showQualitySettings && (
-                  <div className="settings-quality-options">
-                    {QUALITY_OPTIONS.map((option) => (
-                      <label key={option.value} className={`radio quality-option ${quality === option.value ? 'active' : ''}`}>
-                        <input
-                          type="radio"
-                          name="settings-quality"
-                          value={option.value}
-                          checked={quality === option.value}
-                          onChange={() => setQuality(option.value)}
-                        />
-                        <span className="quality-copy">
-                          <span className="quality-label">{option.label}</span>
-                          <span className="quality-detail">{option.detail}</span>
-                        </span>
-                      </label>
-                    ))}
-                  </div>
-                )}
-                <div className="settings-edit-row">
-                  <div className="settings-edit-main">
-                    <span>Local favorito</span>
-                    <strong>{outputDir || 'Nenhuma pasta escolhida'}</strong>
-                  </div>
-                  <button className="button ghost icon-text-button settings-edit-button" type="button" onClick={handleSelectFolder}>
-                    <FiEdit2 aria-hidden="true" />
-                    Editar
-                  </button>
-                </div>
-                <div className="settings-edit-row">
-                  <div className="settings-edit-main">
-                    <span>Filtro de músicas</span>
-                    <strong>{TRACK_FILTERS.find((filter) => filter.value === trackFilter)?.label || 'Todas'}</strong>
-                  </div>
-                </div>
-              </div>
-              <p className="helper">Nome de arquivo, duplicados e subpastas entram na próxima fase de controle de download.</p>
-            </div>
-
-            <div className="settings-section">
-              <div className="settings-section-header">
-                <span className="settings-label">Spotify</span>
-                <strong>{spotifyStatusText}</strong>
-              </div>
-              <div className="settings-status-card">
-                <FiCheckCircle aria-hidden="true" />
-                <div>
-                  <span>{spotifyAuthLabel}</span>
-                  <p>Sem login, o app tenta ler playlists públicas. Para mais estabilidade, conecte uma conta Spotify.</p>
-                </div>
-              </div>
-              {hasDefaultSpotifyClientId && (
-                <p className="helper success">Login Spotify pronto para uso neste build.</p>
-              )}
-              <label className="label settings-token-label">Client ID próprio do Spotify</label>
-              <input
-                className="input"
-                type="text"
-                placeholder="Opcional: cole aqui o Client ID do seu app Spotify"
-                value={spotifyClientId}
-                onChange={(event) => {
-                  setSpotifyClientId(event.target.value);
-                  setTokenSaveState('');
-                }}
-              />
-              {spotifyRedirectUri && (
-                <div className="redirect-row">
-                  <span>{spotifyRedirectUri}</span>
-                  <button className="button ghost icon-text-button" type="button" onClick={handleCopyRedirectUri}>
-                    <FiCopy aria-hidden="true" />
-                    Copiar
-                  </button>
-                </div>
-              )}
-              {redirectCopyState && <p className={`helper ${redirectCopyState.includes('Não consegui') ? 'error' : 'success'}`}>{redirectCopyState}</p>}
-              <div className="settings-actions spotify-actions">
-                <button
-                  className="button ghost"
-                  type="button"
-                  onClick={handleSaveSpotifyClientId}
-                  disabled={!spotifyClientId.trim() || isDownloading}
-                >
-                  Salvar Client ID
-                </button>
-                <button
-                  className="button update"
-                  type="button"
-                  onClick={handleConnectSpotify}
-                  disabled={!canConnectSpotify || isDownloading}
-                >
-                  {hasSpotifyAuth ? 'Reconectar Spotify' : 'Conectar Spotify'}
-                </button>
-                <button
-                  className="button ghost icon-text-button"
-                  type="button"
-                  onClick={handleTestSpotifyConnection}
-                  disabled={isDownloading || (!hasSpotifyAuth && !hasSavedSpotifyToken && !spotifyToken.trim())}
-                >
-                  <FiRefreshCw aria-hidden="true" />
-                  Testar conexão
-                </button>
-                {spotifyLoginUrl && !hasSpotifyAuth && (
-                  <button className="button ghost" type="button" onClick={handleOpenSpotifyLoginUrl}>
-                    Abrir login no Spotify
-                  </button>
-                )}
-                <button
-                  className="button danger"
-                  type="button"
-                  onClick={handleDisconnectSpotify}
-                  disabled={!hasSpotifyAuth || isDownloading}
-                >
-                  Desconectar
-                </button>
-              </div>
-              {spotifyTestState && <p className={`helper ${spotifyTestState.includes('Não consegui') || spotifyTestState.includes('expirou') ? 'error' : 'success'}`}>{spotifyTestState}</p>}
-              {tokenSaveState && <p className={`helper ${tokenSaveState.includes('Não consegui') ? 'error' : 'success'}`}>{tokenSaveState}</p>}
-
-              <div className="settings-advanced">
-                <button
-                  className="settings-advanced-toggle"
-                  type="button"
-                  onClick={() => setShowAdvancedSettings((value) => !value)}
-                  aria-expanded={showAdvancedSettings}
-                >
-                  Avançado
-                  <span>{showAdvancedSettings ? 'Ocultar token manual' : 'Token manual'}</span>
-                </button>
-                {showAdvancedSettings && (
-                  <div className="settings-advanced-body">
-                    <label className="label settings-token-label">Token manual</label>
-                    <input
-                      className="input"
-                      type="password"
-                      placeholder="Cole aqui seu token Bearer"
-                      value={spotifyToken}
-                      onChange={(event) => {
-                        setSpotifyToken(event.target.value);
-                        setTokenSaveState('');
-                        setSpotifyTestState('');
-                      }}
-                    />
-                    <div className="settings-actions">
-                      <button
-                        className="button ghost"
-                        type="button"
-                        onClick={handleSaveSpotifyToken}
-                        disabled={!spotifyToken.trim() || isDownloading}
-                      >
-                        Salvar token atual
-                      </button>
-                      <button
-                        className="button danger"
-                        type="button"
-                        onClick={handleClearSpotifyToken}
-                        disabled={!hasSavedSpotifyToken || isDownloading}
-                      >
-                        Limpar token
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="settings-section">
-              <div className="settings-section-header">
-                <span className="settings-label">Ferramentas</span>
-                <strong>{toolsStatus?.message || 'Ferramentas ainda não verificadas.'}</strong>
-              </div>
-              <div className="tool-status-list">
-                {toolRows.map((tool) => (
-                  <div key={tool.label} className={`tool-status-row ${tool.ready ? 'ready' : 'warning'}`}>
-                    <FiTool aria-hidden="true" />
-                    <div>
-                      <strong>{tool.label}</strong>
-                      <p>{tool.description}</p>
-                    </div>
-                    <span>{tool.ready ? 'Pronto' : 'Atenção'}</span>
-                  </div>
-                ))}
-              </div>
-              <div className="settings-actions">
-                <button className="button ghost icon-text-button" type="button" onClick={handleRefreshToolsStatus}>
-                  <FiRefreshCw aria-hidden="true" />
-                  Verificar ferramentas
-                </button>
-              </div>
-            </div>
-
-            <div className="settings-section settings-section-final">
-              <div className="settings-section-header">
-                <span className="settings-label">Atualizações</span>
-                <strong>{appVersion ? `Soundforge v${appVersion}` : 'Versão local'}</strong>
-              </div>
-              <p className="helper">
-                {readyUpdate ? `Atualização ${readyUpdate.version || ''} pronta para instalar.` : 'Auto-update ativo.'}
-              </p>
-              {readyUpdate && (
-                <button className="button update drawer-update" type="button" onClick={handleRestartAndInstall}>
-                  Reiniciar e instalar
-                </button>
-              )}
-            </div>
-          </aside>
-        </div>
+        <SettingsDrawer
+          appVersion={appVersion}
+          canConnectSpotify={canConnectSpotify}
+          denseResults={denseResults}
+          handleClearSpotifyToken={handleClearSpotifyToken}
+          handleConnectSpotify={handleConnectSpotify}
+          handleCopyRedirectUri={handleCopyRedirectUri}
+          handleDisconnectSpotify={handleDisconnectSpotify}
+          handleOpenSpotifyLoginUrl={handleOpenSpotifyLoginUrl}
+          handleRefreshToolsStatus={handleRefreshToolsStatus}
+          handleRestartAndInstall={handleRestartAndInstall}
+          handleSaveSpotifyClientId={handleSaveSpotifyClientId}
+          handleSaveSpotifyToken={handleSaveSpotifyToken}
+          handleSelectFolder={handleSelectFolder}
+          handleTestSpotifyConnection={handleTestSpotifyConnection}
+          hasDefaultSpotifyClientId={hasDefaultSpotifyClientId}
+          hasSavedSpotifyToken={hasSavedSpotifyToken}
+          hasSpotifyAuth={hasSpotifyAuth}
+          isDownloading={isDownloading}
+          logoSoundforge={logoSoundforge}
+          isClosing={isSettingsClosing}
+          onClose={handleCloseSettings}
+          outputDir={outputDir}
+          quality={quality}
+          readyUpdate={readyUpdate}
+          redirectCopyState={redirectCopyState}
+          selectedQualityLabel={selectedQualityLabel}
+          setQuality={setQuality}
+          setSpotifyClientId={setSpotifyClientId}
+          setSpotifyToken={setSpotifyToken}
+          setTokenSaveState={setTokenSaveState}
+          source={source}
+          spotifyAuthLabel={spotifyAuthLabel}
+          spotifyClientId={spotifyClientId}
+          spotifyLoginUrl={spotifyLoginUrl}
+          spotifyRedirectUri={spotifyRedirectUri}
+          spotifyStatusText={spotifyStatusText}
+          spotifyTestState={spotifyTestState}
+          spotifyToken={spotifyToken}
+          tokenSaveState={tokenSaveState}
+          toolRows={toolRows}
+          toolsStatus={toolsStatus}
+          trackFilter={trackFilter}
+        />
       )}
     </div>
   );

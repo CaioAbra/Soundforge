@@ -1,11 +1,15 @@
-﻿const { defineConfig } = require('vite');
-const react = require('@vitejs/plugin-react');
+// vite.config.js
+// Usa import() dinâmico para evitar o deprecated CJS Node API do Vite 6
+module.exports = async () => {
+  const { defineConfig } = await import('vite');
+  const { default: react } = await import('@vitejs/plugin-react');
 
-module.exports = defineConfig({
-  plugins: [react()],
-  base: './',
-  server: {
-    port: 5173,
-    strictPort: true
-  }
-});
+  return defineConfig({
+    plugins: [react()],
+    base: './',
+    server: {
+      port: 5173,
+      strictPort: true
+    }
+  });
+};
